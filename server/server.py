@@ -24,6 +24,21 @@ KEY DESIGN POINTS
   raw pulses, so editing K on the admin page recomputes all consumption with
   no device involvement — this is the whole point of server-side calibration.
 
+ADR-001 (Self-Describing, Versioned Telemetry Schema) — schema/version rule:
+  Every record in a push batch now carries "schema_version" and "record_type".
+  Acceptance rule (frozen by ADR-001, no silent fallback, no guessing):
+      current version        -> accept
+      immediately-previous    -> accept
+      older than previous     -> reject (quarantine)
+      newer/unknown (future)  -> reject (quarantine)
+  A record missing "schema_version" entirely is treated as schema_version 0
+  (the implicit, pre-ADR-001 layout) for exactly this transition window, since
+  0 is CURRENT-1 while CURRENT==1. Rejected records are quarantined (stored
+  raw, never silently dropped, never crash the request) and excluded from the
+  accepted/ack-eligible set; the rest of the batch is still processed
+  normally. See SCHEMA_REGISTRY.md at the repository root for the full
+  registry of (schema_version, record_type) layouts.
+
 Run:
     pip install flask
     python server.py
@@ -34,6 +49,14 @@ from flask import Flask, request, jsonify, Response, send_from_directory
 
 DB = os.path.join(os.path.dirname(__file__), "covio.db")
 app = Flask(__name__)
+
+# ---- ADR-001: schema/record-type acceptance rule (frozen, do not soften) ----
+CURRENT_SCHEMA_VERSION  = 1     # matches SCHEMA_VERSION_CURRENT in queue.h
+PREVIOUS_SCHEMA_VERSION = 0     # implicit pre-ADR-001 layout during rollout
+ACCEPTED_SCHEMA_VERSIONS = {CURRENT_SCHEMA_VERSION, PREVIOUS_SCHEMA_VERSION}
+
+RECORD_TYPE_TELEMETRY = 1       # matches RECORD_TYPE_TELEMETRY in queue.h
+KNOWN_RECORD_TYPES = {RECORD_TYPE_TELEMETRY}
 
 # ---------------------------------------------------------------- db helpers
 def db():
@@ -54,6 +77,8 @@ def init_db():
         rssi      INTEGER,
         recv_ms   INTEGER NOT NULL,
         kfactor_version INTEGER,
+        schema_version INTEGER NOT NULL DEFAULT 0,  -- ADR-001
+        record_type    INTEGER NOT NULL DEFAULT 1,  -- ADR-001 (1=TELEMETRY)
         PRIMARY KEY (device_id, seq)   -- idempotency guard: seq is GLOBALLY
                                        -- monotonic across reboots on the device,
                                        -- so (device,seq) is the true identity.
@@ -68,6 +93,21 @@ def init_db():
     );
     INSERT OR IGNORE INTO calibration (id, k_factor, density, t_ref, version)
         VALUES (1, 1000.0, 0.84, 15.0, 1);   -- seed: 1000 pulses/litre, editable
+
+    -- ADR-001: records rejected by the schema/record_type acceptance rule are
+    -- quarantined here rather than silently dropped or allowed to crash the
+    -- request. Never used for ack computation.
+    CREATE TABLE IF NOT EXISTS quarantined_records (
+        device_id      TEXT NOT NULL,
+        boot_id        INTEGER,
+        seq            INTEGER,
+        schema_version INTEGER,
+        record_type    INTEGER,
+        reason         TEXT NOT NULL,
+        raw_json       TEXT NOT NULL,
+        recv_ms        INTEGER NOT NULL,
+        PRIMARY KEY (device_id, seq, schema_version)
+    );
     """)
     c.commit(); c.close()
 
@@ -80,13 +120,53 @@ def push():
     dev = body.get("device_id", "unknown")
     kver = body.get("kfactor_version", 0)
     c = db()
+    now_ms = int(time.time() * 1000)
     for r in body["records"]:
+        # ADR-001 acceptance rule: current + immediately-previous version only.
+        # A record missing "schema_version" is treated as version 0 (the
+        # implicit pre-ADR-001 layout) — see module docstring. This check is
+        # per-record (not per-batch) so a batch mixing current+previous is
+        # handled correctly, and one malformed/rejected record never crashes
+        # or blocks the rest of the batch.
+        sv = r.get("schema_version", PREVIOUS_SCHEMA_VERSION)
+        rt = r.get("record_type", RECORD_TYPE_TELEMETRY)
+        reason = None
+        if sv not in ACCEPTED_SCHEMA_VERSIONS:
+            reason = "unsupported_schema_version:%r" % (sv,)
+        elif rt not in KNOWN_RECORD_TYPES:
+            reason = "unknown_record_type:%r" % (rt,)
+
+        if reason:
+            # Quarantine, never crash, never silently drop, never fall back
+            # to a guessed interpretation of the record.
+            c.execute("""INSERT OR IGNORE INTO quarantined_records
+                (device_id,boot_id,seq,schema_version,record_type,reason,raw_json,recv_ms)
+                VALUES (?,?,?,?,?,?,?,?)""",
+                (dev, r.get("boot_id"), r.get("seq"), sv, rt,
+                 reason, json.dumps(r), now_ms))
+            continue
+
+        # Required fields for an accepted TELEMETRY record. A record that
+        # claims an accepted schema_version/record_type but is missing a
+        # required field is itself malformed -> quarantine it too, rather
+        # than raising a KeyError and crashing the whole request.
+        try:
+            boot_id, seq, ts, totalizer = r["boot_id"], r["seq"], r["ts"], r["totalizer"]
+        except KeyError as e:
+            c.execute("""INSERT OR IGNORE INTO quarantined_records
+                (device_id,boot_id,seq,schema_version,record_type,reason,raw_json,recv_ms)
+                VALUES (?,?,?,?,?,?,?,?)""",
+                (dev, r.get("boot_id"), r.get("seq"), sv, rt,
+                 "missing_field:%s" % e, json.dumps(r), now_ms))
+            continue
+
         # INSERT OR IGNORE = idempotent: duplicate (dev,boot,seq) is a no-op.
         c.execute("""INSERT OR IGNORE INTO records
-            (device_id,boot_id,seq,ts,totalizer,quality,rssi,recv_ms,kfactor_version)
-            VALUES (?,?,?,?,?,?,?,?,?)""",
-            (dev, r["boot_id"], r["seq"], r["ts"], r["totalizer"],
-             r.get("quality",0), r.get("rssi",0), int(time.time()*1000), kver))
+            (device_id,boot_id,seq,ts,totalizer,quality,rssi,recv_ms,kfactor_version,
+             schema_version,record_type)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (dev, boot_id, seq, ts, totalizer,
+             r.get("quality",0), r.get("rssi",0), now_ms, kver, sv, rt))
     c.commit()
 
     # cumulative ack: highest CONTIGUOUS seq held for this device, across ALL

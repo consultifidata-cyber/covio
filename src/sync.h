@@ -14,6 +14,13 @@
 // ACK RULE: the queue is pruned ONLY when the response body parses to a valid
 // ack_seq. A bare HTTP 200 with no/garbled body prunes nothing — records stay
 // queued and get retried. This is what guarantees no silent data loss.
+//
+// ADR-001 note: pushOnce() forwards whatever Telemetry::toJson() produces
+// as-is. It has no schema_version/record_type awareness of its own — the
+// per-record envelope fields are stamped by Telemetry::build()/toJson() and
+// interpreted by the receiver. Acceptance/rejection of a given schema_version
+// is entirely a receiver-side decision (server/server.py); the device never
+// negotiates or inspects its own schema version at push time.
 // ============================================================================
 #pragma once
 #include <Arduino.h>

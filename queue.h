@@ -27,9 +27,24 @@
 #define ACK_PATH_A   "/queue/ackA.bin"
 #define ACK_PATH_B   "/queue/ackB.bin"
 
+// ---------------------------------------------------------------------------
+// ADR-001 (Self-Describing, Versioned Telemetry Schema): every record, on both
+// the SD row and the wire JSON, is prefixed with a schema_version and a
+// record_type. A device only ever writes/emits the single schema_version its
+// currently-running firmware understands (no runtime negotiation). Each
+// (schema_version, record_type) pair's layout is fixed forever once published
+// — see SCHEMA_REGISTRY.md at the repository root for the authoritative,
+// versioned field-layout registry. Do not bump SCHEMA_VERSION_CURRENT to
+// change an already-published layout; introduce a new version instead.
+// ---------------------------------------------------------------------------
+#define SCHEMA_VERSION_CURRENT  1   // current schema_version this firmware writes
+#define RECORD_TYPE_TELEMETRY   1   // the only record_type defined as of Phase 1
+
 // One queued telemetry row. Fixed size => torn writes are detectable by size+CRC.
 struct __attribute__((packed)) QRow {
   uint32_t magic;
+  uint16_t schema_version; // ADR-001: schema this row was written under
+  uint16_t record_type;    // ADR-001: RECORD_TYPE_* discriminator
   uint32_t boot_id;
   uint32_t seq;
   uint32_t ts;            // device uptime seconds (server stamps wall-clock)

@@ -30,6 +30,8 @@ public:
   static QRow build(Store& st, uint64_t totalizer, uint32_t seq,
                     uint32_t uptimeSec, bool backlogHigh) {
     QRow r{};
+    r.schema_version = SCHEMA_VERSION_CURRENT;  // ADR-001
+    r.record_type    = RECORD_TYPE_TELEMETRY;   // ADR-001
     r.boot_id   = st.bootId();
     r.seq       = seq;
     r.ts        = uptimeSec;
@@ -46,12 +48,17 @@ public:
   //   "device_id":"esp32-....","fw":"1.0.0","model":"covio-oilflow-v1",
   //   "kfactor_version": <uint>,
   //   "records":[
-  //     {"boot_id":N,"seq":N,"ts":N,"totalizer":N,"quality":N,"rssi":-N}, ...
+  //     {"schema_version":N,"record_type":N,"boot_id":N,"seq":N,"ts":N,
+  //      "totalizer":N,"quality":N,"rssi":-N}, ...
   //   ]
   // }
+  // ADR-001: schema_version/record_type are carried per-record (not just once
+  // per batch) so the receiver can validate/dispatch each record independently
+  // — this is what makes a batch mixing the current and previous schema
+  // version (normal during an OTA rollout window) well-formed and acceptable.
   static String toJson(Store& st, const QRow* rows, int n) {
     String s;
-    s.reserve(128 + n * 96);
+    s.reserve(128 + n * 128);
     s  = "{\"device_id\":\"" + st.deviceId() + "\"";
     s += ",\"fw\":\"" FW_VERSION "\"";
     s += ",\"model\":\"" DEVICE_MODEL "\"";
@@ -60,7 +67,9 @@ public:
     for (int i = 0; i < n; i++) {
       if (i) s += ",";
       const QRow& r = rows[i];
-      s += "{\"boot_id\":" + String(r.boot_id);
+      s += "{\"schema_version\":" + String(r.schema_version);
+      s += ",\"record_type\":"    + String(r.record_type);
+      s += ",\"boot_id\":" + String(r.boot_id);
       s += ",\"seq\":"      + String(r.seq);
       s += ",\"ts\":"       + String(r.ts);
       s += ",\"totalizer\":" + String((unsigned long long)r.totalizer);
