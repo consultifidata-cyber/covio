@@ -15,7 +15,7 @@
 | Field | Value |
 |---|---|
 | Current schema_version (firmware) | `1` (`SCHEMA_VERSION_CURRENT` in `queue.h`) |
-| Previous schema_version (receiver-tolerated) | `0` (implicit pre-ADR-001 layout; see below) |
+| Previous schema_version (receiver-tolerated) | **none yet** — a "previous" version only exists once schema_version 2 is published (see ACR-001) |
 | Record types defined to date | `1` = `TELEMETRY` |
 
 ---
@@ -28,9 +28,9 @@
 
 ---
 
-## schema_version 0 — implicit pre-ADR-001 layout (legacy / previous)
+## schema_version 0 — implicit pre-ADR-001 layout (legacy, retired via forced drain — NOT accepted)
 
-This is **not** a formally versioned layout — it is the fixed, un-versioned format every device wrote before ADR-001 was implemented, given the number `0` here solely so the "current + previous" compatibility rule has a well-defined "previous" to accept during the Phase 1 rollout window. No firmware after Phase 1 ever writes this layout going forward; the receiver accepts it only for as long as any device might still be running pre-Phase-1 firmware.
+This is **not** a formally versioned layout, and per **ACR-001** it is **not** an accepted "previous" version either — it is simply the fixed, un-versioned format every device wrote before ADR-001 existed. ADR-001's Migration Strategy requires any such device to be fully drained to an empty queue under its old firmware before the OTA introducing this schema is applied — a one-time, one-directional cutover, not a dual-acceptance window. The receiver therefore quarantines any record with no `schema_version` key (or any unregistered value), exactly like any other unsupported version. It is documented here only for historical/byte-layout reference.
 
 ### SD row (`QRow`, pre-Phase-1) — 32 bytes, packed
 
@@ -51,7 +51,7 @@ This is **not** a formally versioned layout — it is the fixed, un-versioned fo
 {"boot_id":N,"seq":N,"ts":N,"totalizer":N,"quality":N,"rssi":-N}
 ```
 
-No `schema_version`/`record_type` field was present at all. The receiver treats a record with no `schema_version` key as `schema_version = 0` for the duration of the rollout-tolerance window only.
+No `schema_version`/`record_type` field was present at all. Per ACR-001, the receiver does **not** treat a missing `schema_version` key as an accepted version — it is quarantined, consistent with ADR-001's forced-drain migration strategy.
 
 ---
 
@@ -119,7 +119,7 @@ No batch-envelope field, cadence, batch size (`PUSH_BATCH_MAX`), idempotency key
 ## Receiver behavior notes (`server/server.py`)
 
 - `records` table gains `schema_version` and `record_type` columns (defaulted for any pre-existing rows).
-- A new `quarantined_records` table stores, verbatim, any record whose `schema_version` is outside `{1, 0}` or whose `record_type` is not in the known set (`{1}`), or which is otherwise malformed — the raw JSON, device_id, and a reason string are recorded. Quarantined records are never included in `ack_seq` computation and never crash the request; the rest of the batch is still processed normally.
+- A new `quarantined_records` table stores, verbatim, any record whose `schema_version` is outside the currently-registered accepted set (`{1}` as of Phase 1 — see ACR-001) or whose `record_type` is not in the known set (`{1}`), or which is otherwise malformed — the raw JSON, device_id, and a reason string are recorded. Quarantined records are never included in `ack_seq` computation and never crash the request; the rest of the batch is still processed normally.
 - `CURRENT_SCHEMA_VERSION` / `PREVIOUS_SCHEMA_VERSION` / `ACCEPTED_SCHEMA_VERSIONS` and `RECORD_TYPE_TELEMETRY` / `KNOWN_RECORD_TYPES` are defined as module-level constants at the top of `server.py`, mirroring `queue.h`'s `SCHEMA_VERSION_CURRENT` / `RECORD_TYPE_TELEMETRY` constants exactly — keep these two files' numeric values in sync by hand until a shared schema-constants source exists (no such mechanism is introduced in Phase 1; not in scope).
 
 ## Migration Notes (ADR-001, Migration Checklist item 1 in the Master Plan)
@@ -134,3 +134,4 @@ No batch-envelope field, cadence, batch size (`PUSH_BATCH_MAX`), idempotency key
 |---|---|---|---|---|
 | 0 (implicit) | (none — no discriminator existed) | pre-ADR-001 | — | Original fixed, un-versioned `QRow`/JSON layout. |
 | 1 | 1 (`TELEMETRY`) | Phase 1 / ADR-001 | 2026-07-08 | Added `schema_version`/`record_type` discriminator fields to both the SD row and the wire JSON; published this registry; implemented the current+previous receiver acceptance rule. |
+| 1 | 1 (`TELEMETRY`) | Phase 1 / ADR-001 (ACR-001 correction) | 2026-07-08 | Corrected the receiver to stop treating `schema_version = 0` / missing `schema_version` as an accepted "previous" version — no registered previous version exists until schema_version 2 is published. Missing/unregistered versions are now quarantined, per ADR-001's forced-drain migration strategy. See `Docs/ACR-001-schema-version-zero-acceptance-window.md`. |

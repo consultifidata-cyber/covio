@@ -28,14 +28,21 @@ ADR-001 (Self-Describing, Versioned Telemetry Schema) — schema/version rule:
   Every record in a push batch now carries "schema_version" and "record_type".
   Acceptance rule (frozen by ADR-001, no silent fallback, no guessing):
       current version        -> accept
-      immediately-previous    -> accept
+      immediately-previous REGISTERED version -> accept
       older than previous     -> reject (quarantine)
       newer/unknown (future)  -> reject (quarantine)
-  A record missing "schema_version" entirely is treated as schema_version 0
-  (the implicit, pre-ADR-001 layout) for exactly this transition window, since
-  0 is CURRENT-1 while CURRENT==1. Rejected records are quarantined (stored
-  raw, never silently dropped, never crash the request) and excluded from the
-  accepted/ack-eligible set; the rest of the batch is still processed
+  "Previous" only exists once a second schema_version has actually been
+  published (i.e. once CURRENT_SCHEMA_VERSION > 1). As of Phase 1,
+  CURRENT_SCHEMA_VERSION == 1 and there is no registered previous version:
+  ADR-001's Migration Strategy requires any pre-ADR-001 (unversioned) device
+  to be fully drained under its old firmware before this OTA — a one-time,
+  one-directional cutover, NOT a dual-acceptance window. A record with no
+  "schema_version" key, or any value other than a currently-registered
+  version, is therefore quarantined, exactly like any other unsupported
+  version. See ACR-001 (Docs/ACR-001-schema-version-zero-acceptance-window.md)
+  for the compliance finding this corrected. Quarantined records are stored
+  raw, never silently dropped, never crash the request, and are excluded from
+  the accepted/ack-eligible set; the rest of the batch is still processed
   normally. See SCHEMA_REGISTRY.md at the repository root for the full
   registry of (schema_version, record_type) layouts.
 
@@ -51,9 +58,16 @@ DB = os.path.join(os.path.dirname(__file__), "covio.db")
 app = Flask(__name__)
 
 # ---- ADR-001: schema/record-type acceptance rule (frozen, do not soften) ----
-CURRENT_SCHEMA_VERSION  = 1     # matches SCHEMA_VERSION_CURRENT in queue.h
-PREVIOUS_SCHEMA_VERSION = 0     # implicit pre-ADR-001 layout during rollout
-ACCEPTED_SCHEMA_VERSIONS = {CURRENT_SCHEMA_VERSION, PREVIOUS_SCHEMA_VERSION}
+# Per ACR-001: "previous" is only a real, accepted version once a second
+# schema_version has actually been registered (CURRENT > 1). At Phase 1,
+# CURRENT == 1, so PREVIOUS_SCHEMA_VERSION is None and only {1} is accepted
+# — the pre-ADR-001 unversioned layout is retired via forced-drain, not
+# accepted here (ADR-001 Migration Strategy), matches SCHEMA_VERSION_CURRENT
+# in queue.h.
+CURRENT_SCHEMA_VERSION  = 1
+PREVIOUS_SCHEMA_VERSION = CURRENT_SCHEMA_VERSION - 1 if CURRENT_SCHEMA_VERSION > 1 else None
+ACCEPTED_SCHEMA_VERSIONS = {CURRENT_SCHEMA_VERSION} | (
+    {PREVIOUS_SCHEMA_VERSION} if PREVIOUS_SCHEMA_VERSION is not None else set())
 
 RECORD_TYPE_TELEMETRY = 1       # matches RECORD_TYPE_TELEMETRY in queue.h
 KNOWN_RECORD_TYPES = {RECORD_TYPE_TELEMETRY}
@@ -122,13 +136,14 @@ def push():
     c = db()
     now_ms = int(time.time() * 1000)
     for r in body["records"]:
-        # ADR-001 acceptance rule: current + immediately-previous version only.
-        # A record missing "schema_version" is treated as version 0 (the
-        # implicit pre-ADR-001 layout) — see module docstring. This check is
-        # per-record (not per-batch) so a batch mixing current+previous is
-        # handled correctly, and one malformed/rejected record never crashes
-        # or blocks the rest of the batch.
-        sv = r.get("schema_version", PREVIOUS_SCHEMA_VERSION)
+        # ADR-001 acceptance rule: current + registered-previous version only
+        # (see ACR-001 — there is no registered previous version until a
+        # second schema_version exists). A record with no "schema_version"
+        # key at all is therefore unsupported, not defaulted to an accepted
+        # value. This check is per-record (not per-batch) so a batch mixing
+        # current+previous is handled correctly, and one malformed/rejected
+        # record never crashes or blocks the rest of the batch.
+        sv = r.get("schema_version", None)
         rt = r.get("record_type", RECORD_TYPE_TELEMETRY)
         reason = None
         if sv not in ACCEPTED_SCHEMA_VERSIONS:
