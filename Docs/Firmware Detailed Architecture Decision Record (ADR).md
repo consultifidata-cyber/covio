@@ -270,6 +270,8 @@
 
 ## ADR-008 — Provisioning & Commissioning Platform
 
+**Governance note (added by `ADR-017`, DM-Phase 1.8, Covio Device Manager Live Readiness Plan):** this entry's commissioning-*mechanism* deferral — the "AP/BLE/QR-based commissioning is explicitly deferred, not built, in this release" clause in the Architecture Decision below — is **superseded by `ADR-017` — LAN-Local Diagnostics & WiFi-Based Provisioning**. Nothing else in this entry is changed: the factory-test firmware design, the `verify` field-commissioning workflow, and this entry's own Definition of Done all stand exactly as originally frozen.
+
 **Decision Name:** Factory Self-Test Firmware and Console-Based Field Verification
 
 **Problem Statement:** There is no factory self-test procedure, no per-device unique-secret injection process, and no field-commissioning verification step distinct from the engineering bench test; installers cannot commission a device without engineering support.
@@ -305,6 +307,8 @@
 ---
 
 ## ADR-009 — Device & Asset Identity Model
+
+**Governance note (added by `ADR-018`, DM-Phase 1.8, Covio Device Manager Live Readiness Plan):** this entry's identity model is **extended (not changed) by `ADR-018` — Logical Device ID: A Third Identity Tier**, which adds a new manufacturing-serial tier between `hardware_id` and `asset_id`. Nothing in this entry's own decision — the `hardware_id`/`asset_id` split, the receiver-side litre-aggregation-by-`asset_id` model, or the `decommission` command — is altered.
 
 **Decision Name:** Separate Hardware Identity from Logical Asset Identity
 
@@ -584,3 +588,107 @@ Every decision that determines *what the firmware does* is now a single, stated 
 3. **Organizational/business policy decisions** — specifically, who holds approval authority for calibration changes (ADR-010) and the exact mechanical/jig design for factory testing (ADR-008) — are explicitly deferred because they depend on decisions outside any firmware architecture document's authority to make. Both are named, scoped, and given a stated extension path rather than left as silent unknowns.
 
 **Conclusion: the firmware architecture is now frozen.** Any change to a decision recorded in ADR-001 through ADR-016 requires a new ADR that explicitly supersedes it. The three items above are not exceptions to this freeze — they are correctly identified as belonging to a different, adjacent authority, each with a clearly stated contract that whoever makes that decision must honor.
+
+---
+
+# Post-Freeze Supersession — DM-Phase 1.8
+
+The two entries below are additions made after the original freeze above, following the exact governance mechanism that freeze itself requires: a new, explicitly-superseding ADR, authored with the same template and reviewed with the same rigor as ADR-001–016 — never a silent edit to a frozen decision (`MASTER_GOVERNANCE.md` §1 Rule 1, §4). Both are drafted from content the *Covio Device Manager Live Readiness Plan* (`Docs/Covio_Device_Manager_Live_Readiness_Plan.md`) already specifies in full (§0, §3.1, §3.1a, §5, §11.2) — DM-Phase 1.8's job is to formalize that content into this document's own record, not to invent new architecture.
+
+**Status of both entries below: `APPROVED` — 2026-07-09.** Reviewed and approved in the `Architecture Owner` capacity per the Live Readiness Plan's own DM-Phase 1.8 acceptance criteria. DM-Phase 2 implementation is authorized to proceed as of this approval.
+
+---
+
+## ADR-017 — LAN-Local Diagnostics & WiFi-Based Provisioning
+
+**Status:** `APPROVED` — 2026-07-09 (Architecture Owner review, DM-Phase 1.8).
+
+**Supersedes:** `ADR-008`'s commissioning-mechanism deferral only (the "AP/BLE/QR-based commissioning is explicitly deferred" clause). `ADR-008`'s factory-self-test design, `verify` command, and Definition of Done otherwise stand unmodified.
+
+**Decision Name:** LAN-Local Diagnostics & WiFi-Based Provisioning
+
+**Problem Statement:** Today, reading or configuring a Covio device over WiFi does not exist in any form: no local server on the device (`sync.h`/`ota.h` only ever originate outbound requests), no SoftAP/captive portal (`wifiConnect()` only ever calls `WiFi.mode(WIFI_STA)`), no mDNS/discovery, and provisioning is 100% USB-serial (`F-28`/`F-29` in the Blueprint, both **P1** — every device requires a laptop, a terminal, and exact console-command syntax knowledge). `ADR-008` considered AP/BLE/QR-based commissioning and explicitly deferred it as disproportionate to near-term fleet scale at the time. That fleet scale has since arrived: a factory or field operator must now be able to power on a device, discover it over WiFi from a Windows PC, and configure and subsequently monitor it — indefinitely, not just during setup — with no USB cable.
+
+**Business Goal:** Enable WiFi-based discovery, configuration, and ongoing live monitoring of Covio devices with no USB cable required, without redesigning the provisioning data model `ADR-008` already established, and without over-investing in commissioning infrastructure disproportionate to current fleet scale (the same proportionality principle `ADR-008` itself applied).
+
+**Architecture Decision:**
+A versioned, read-only local HTTP API (`WebServer.h` — synchronous, built into `arduino-esp32`, not `ESPAsyncWebServer`) exposes `GET /api/v1/info|status|health|metrics|logs` (the last returning `501` honestly until `ADR-012`'s log buffer exists) plus a `GET /` HTML mirror, always-on and unauthenticated by design — it never returns a raw secret (`api_key`, `wifi_pass`), only masked status, matching the risk profile of exposing telemetry rather than secrets to anyone already on the LAN. `ESPmDNS` advertises `_covio._tcp.local` (instance name `covio-<last6hexofmac>`, TXT records `hardware_id`/`fw`/`model`/`logical_device_id`) so the desktop app never needs a technician to know or guess a device's IP.
+
+A SoftAP + captive portal (`wifi_provision.h`: `DNSServer` redirect-all-to-192.168.4.1 + a `WebServer` setup form) activates as a **fallback state, never a permanent mode** — only when station connection has not succeeded within a bounded boot-time timeout, or when explicitly triggered by a new `provision` console command on an already-commissioned device (reconfiguration without a factory reset). It automatically stops broadcasting the moment station WiFi is confirmed; an always-on open setup network is a standing attack surface and is explicitly rejected. All configuration writes reuse `Store`'s existing NVS setters (`setWifi`/`setServerUrl`/`setApiKey`) verbatim — no new provisioning data model is introduced, exactly the "additional front-end to the same underlying configuration setters" `ADR-008` itself already names as its own Future Extension.
+
+Config *writes* (`POST /api/v1/config`) are accepted **only** while the device is in AP/provisioning mode — never on the normal station-mode local API. This is the compensating control for not having real per-device TLS on a LAN-local self-hosted endpoint: physical/RF proximity to the device's own SoftAP is the trust boundary, mirroring `ADR-005`'s own stated principle that physical possession is this architecture's full-trust boundary.
+
+WiFi-connectivity authority — currently split between `Sync` and `Ota`, each independently polling `WiFi.status()` (Blueprint Task 4/5's already-documented coupling risk) — is consolidated into one module as part of this same change, rather than left to compound as a third consumer (the new local API / provisioning logic) is added on top.
+
+**Reasoning:** `ADR-008`'s original deferral was a reasonable, deliberate decision given the information available when it was written — this is not a defect being corrected, it is the business need `ADR-008` itself anticipated arriving. Reusing `Store`'s existing NVS setters rather than inventing a new provisioning data model keeps this change strictly additive to `ADR-008`'s factory-self-test design. `WebServer.h` (not `ESPAsyncWebServer`) matches this project's existing single-threaded, cooperative-scheduler architecture (`covio_firmware.ino`); introducing an async web stack would be a larger architectural shift than this problem needs and would touch every module's assumption about single-threaded execution.
+
+**Alternatives Rejected:**
+- *A full mobile app with BLE provisioning, built now* — reaffirmed as rejected for this release, per `ADR-008`'s own original reasoning: disproportionate engineering investment relative to near-term fleet scale. Remains a documented future extension (§11.9's roadmap), not silently dropped a second time.
+- *`ESPAsyncWebServer` instead of the synchronous `WebServer.h`* — rejected: would touch every module's single-threaded-execution assumption for no benefit this problem actually needs.
+- *A pre-shared/printed AP password instead of an open, time-bounded SoftAP* — rejected for this release: no physical label/QR mechanism currently exists in the manufacturing process to carry a per-device password. Physical/RF proximity is accepted as the trust boundary instead, mirroring `ADR-005`. This was an explicitly open decision (Live Readiness Plan §10 item 1); this ADR ratifies it rather than leaving it implicit.
+- *Authenticated station-mode remote config now, instead of deferring it* — rejected: would require a second, weaker, ad hoc auth scheme before real per-device credentials exist (DM-Phase 5). Deferred explicitly, not built as a stopgap.
+
+**Trade-offs:**
+- *Performance:* Negligible — `WebServer::handleClient()` is a two-line addition to `loop()`, matching the existing per-iteration service-call pattern (`provision.service()`, `syncEngine.wifiService()`).
+- *Reliability:* Improves observability (local diagnostics) and commissioning reliability (no cable/console-syntax dependency); the boot-time AP-fallback timeout is new device-lifecycle-affecting logic — the primary reliability risk this ADR knowingly accepts, mitigated by WiFi-authority consolidation happening in the same change.
+- *Complexity:* Moderate — one new SoftAP/captive-portal module, one new console command, one WiFi-authority consolidation.
+- *Maintenance:* Improves — both the local API and the provisioning flow reuse existing `Store` setters/NVS layer rather than introducing a parallel configuration mechanism.
+- *Security:* The local diagnostics API is read-only/unauthenticated by design (matching the risk profile of exposing telemetry, not secrets); config writes are gated to AP-mode-only as a compensating control, not full TLS — an explicitly accepted interim posture pending DM-Phase 5's per-device credentials. An open, time-bounded SoftAP requires the same physical/RF proximity `ADR-005` already accepts as this architecture's full-trust boundary.
+- *Scalability:* None directly — per-device, no fleet-size dependency.
+- *Cost:* Low-moderate; the deferred BLE/mobile-app investment remains a larger, separately-scoped future cost, unchanged from `ADR-008`'s original assessment.
+
+**Compatibility:** Storage — no SD/NVS layout change; reuses `Store`'s existing setters/fields verbatim. Protocol — additive; a new versioned local-only HTTP API (`/api/v1/...`) and a new mDNS service, neither touching the existing cloud-facing wire contract (`ADR-001`/`ADR-005` govern that, unaffected — confirmed §13 A.1: "All cloud-facing endpoints... remain governed by `ADR-005`"). Configuration — no new NVS keys; `setWifi`/`setServerUrl`/`setApiKey` are the sole write path. OTA — no. Fleet — the new local API and mDNS advertisement become the desktop app's (DM-Phase 3) primary discovery/config mechanism. Backward compatibility — fully additive; the existing USB-serial console remains fully functional and unchanged throughout, as an unaffected fallback.
+
+**Migration Strategy:** No forced migration. This is new capability layered onto already-fielded devices via a normal OTA update; the existing USB-serial console (`show`/`set url|key|wifi`/`reboot`/`factory`) remains fully functional and unchanged throughout.
+
+**Definition of Done:** Every endpoint in the frozen local-API contract (Live Readiness Plan §13, Appendix A) is reachable at both IP and mDNS hostname, matches its schema exactly, and never returns a raw secret (verified for the read-only subset as of DM-Phase 1); an unconfigured unit's SoftAP is visible within 60 seconds of boot and automatically stops broadcasting once station WiFi is confirmed; submitting valid WiFi/server/key via the captive portal results in a station-mode reboot and a successful first push within 2 minutes; the `provision` console command re-enters AP mode on an already-configured unit without touching existing queue/totalizer state; WiFi-connectivity authority is demonstrably owned by one module, not polled independently by both `Sync` and `Ota`.
+
+**Future Extension:** A mobile/BLE/QR commissioning tool remains available to add later as an additional front-end to the same underlying `Store` configuration setters this ADR reuses, without redesigning the provisioning data model a second time — restating `ADR-008`'s own original Future Extension, unchanged. Authenticated station-mode remote config (without requiring AP-mode re-entry) is deferred to DM-Phase 5, once real per-device credentials exist.
+
+---
+
+## ADR-018 — Logical Device ID: A Third Identity Tier
+
+**Status:** `APPROVED` — 2026-07-09 (Architecture Owner review, DM-Phase 1.8).
+
+**Extends:** `ADR-009`'s identity model, additively. Nothing in `ADR-009`'s own decision — the `hardware_id`/`asset_id` split, receiver-side litre aggregation by `asset_id`, or the `decommission` command — is changed.
+
+**Decision Name:** Logical Device ID — A Manufacturing-Time Identity Tier Between `hardware_id` and `asset_id`
+
+**Problem Statement:** `ADR-009` (frozen) separates `hardware_id` (MAC-derived, permanent per board) from `asset_id` (installer-assigned, representing the installation). Neither identifier is usable to track a freshly-manufactured unit through manufacturing, RMA, and warranty before it has a customer or an installation: `asset_id` is free text an installer chooses at commissioning time and simply doesn't exist yet for a unit sitting in a box, and `hardware_id` alone is not a durable identity across a controller-board replacement — the exact scenario `ADR-009` already exists to solve for the *installation*, but not for the *unit itself* pre-installation.
+
+**Business Goal:** Give the factory line a stable, globally-unique, QR-encodable identifier to track a unit through manufacturing, RMA, and warranty, and give board-replacement/RMA workflows a durable identity to reprint onto a replacement board — without changing anything `ADR-009` already decided about `hardware_id` or `asset_id`.
+
+**Architecture Decision:** A third identity tier, the **Logical Device ID** (e.g. `COV-000123`), is introduced: a manufacturing serial generated once during factory self-test (§11.7 of the Live Readiness Plan, ties to `ADR-008`'s frozen factory-test design), stored in NVS as a new field, and printed on the unit's QR label. It sits between `hardware_id` (permanent per board, exists today) and `asset_id` (installer-assigned per site, exists in `ADR-009`'s design):
+
+```
+hardware_id            Logical Device ID          asset_id
+(MAC / chip-derived)    (e.g. COV-000123)         (e.g. "Boiler 2 Oil Meter")
+permanent per board     manufacturing serial       installer-assigned, per site
+```
+
+On a controller-board replacement (the scenario `ADR-009` already exists for), the Logical Device ID — not `hardware_id` — is what gets reused/reprinted onto the replacement board's own label, as the durable identity for warranty/RMA tracking purposes; `asset_id` stays with the installation regardless, unaffected. Exposed read-only via the local API's `/api/v1/info` (already implemented as of DM-Phase 1: `logical_device_id`, `string | null`, `null` until assigned at factory commissioning). Console/config surface: a new `set serial <id>` companion to `ADR-009`'s existing `set asset <id>`, or — preferably — the desktop app's factory workflow (§11.7, DM-Phase 6) sets it directly via the local API rather than requiring a console command at all. **Neither the console command nor the factory workflow is implemented by this ADR** — this ADR reserves the field and its semantics; DM-Phase 6 implements the generation/write path.
+
+**Reasoning:** This is additive, not a redesign — it does not change either existing field's meaning or remove anything `ADR-009` already decided. `asset_id` is free text an installer chooses at commissioning time; it cannot serve the factory line's need for a stable identifier before an installation exists. A third, purpose-built tier avoids overloading `asset_id` with a meaning it wasn't designed for, and directly fulfills what `ADR-009` already named as its own future extension: *"`asset_id` assignment can later be automated (e.g., via a QR code scanned by a future commissioning app) without changing the underlying data model"* — here the QR encodes the Logical Device ID specifically, and a later enhancement letting an installer scan it to auto-fill `asset_id` at commissioning is exactly the mechanism `ADR-009` already anticipated, not a new one.
+
+**Alternatives Rejected:**
+- *Using `hardware_id` alone as the durable manufacturing/RMA identity* — rejected: not usable across a controller-board replacement, the exact scenario this identity needs to survive.
+- *Overloading `asset_id` to also serve as the pre-installation manufacturing identifier* — rejected: conflates two genuinely different concerns (a free-text, installer-chosen, per-site label vs. a stable, globally-unique, factory-generated serial) and would require `asset_id` to exist before an installation does, contradicting its own design.
+- *Deferring this entirely until DM-Phase 6 without reserving the field/tier now* — rejected: DM-Phase 1's `/api/v1/info` schema already needs a `logical_device_id` field to exist (as `null`) so the local-API contract doesn't require a breaking `/v2/` change once DM-Phase 6 later populates it.
+
+**Trade-offs:**
+- *Performance:* None.
+- *Reliability:* Improves RMA/warranty traceability for a manufactured unit before it has an installation.
+- *Complexity:* Low — one new NVS field, one reserved local-API field (already `null`-typed and implemented as of DM-Phase 1), one future console command/factory-workflow write path (DM-Phase 6, not this ADR).
+- *Maintenance:* Improves — gives support/RMA a durable identity across a board swap, consistent with `ADR-009`'s own aggregation-by-`asset_id` model, without disturbing it.
+- *Security:* None directly — not a secret, not used for authentication, same posture as `asset_id` under `ADR-009`.
+- *Scalability:* None directly.
+- *Cost:* Low; the QR-label printing step itself is a manufacturing-process cost tracked under DM-Phase 6/§11.7, not introduced by this ADR.
+
+**Compatibility:** Storage — new NVS field only; no change to any existing NVS key. Protocol — additive; `/api/v1/info`'s `logical_device_id` field already exists in the frozen local-API contract as `string | null`, so no local-API version bump is required when DM-Phase 6 later populates it. Configuration — new NVS key, written only by the (not-yet-implemented) factory workflow or console command. OTA — no. Fleet — becomes a fleet-management identifier for manufacturing/RMA/warranty tracking, distinct from `asset_id`'s per-installation role. Backward compatibility — fully additive; `null` is the valid, expected state for every unit until DM-Phase 6 ships.
+
+**Migration Strategy:** No forced migration. Devices manufactured before this ADR (and before DM-Phase 6 ships) simply report `logical_device_id: null` indefinitely — no retroactive assignment is implied or required by this ADR.
+
+**Definition of Done:** `logical_device_id` exists as a `null`-valued field in `/api/v1/info` (already true as of DM-Phase 1's implementation, confirmed against the frozen local-API contract). Generation, NVS write, and QR-label printing remain DM-Phase 6/§11.7's job and are explicitly **not** part of this ADR's own Definition of Done — this ADR's completion criterion is the reserved tier/field existing and being documented, not the full factory workflow.
+
+**Future Extension:** The desktop app's factory workflow (DM-Phase 6) writes this field via the local API rather than a console command, per the Live Readiness Plan's own stated preference (§11.2). A future installer-facing QR scan that auto-fills `asset_id` from a scanned Logical Device ID is exactly the mechanism `ADR-009` already anticipated as its own Future Extension — not a new one.

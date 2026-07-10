@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <!-- DM-Phase 6: img-src gained `data:` specifically for the Factory Test
+       view's QR code (generated in-memory in the main process, returned as
+       a data: URL -- see qrGenerator.js). Scoped narrowly to images only;
+       script-src/connect-src/style-src are all unchanged from DM-Phase 3's
+       own audited baseline. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none';">
+  <title>Covio Device Manager</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="shell">
+    <nav class="sidebar" id="sidebar">
+      <div class="brand">Covio Device Manager</div>
+      <ul class="nav-list" id="nav-list">
+        <!-- populated by app.js from the §11.6 module map -->
+      </ul>
+      <div class="sidebar-footer" id="app-version"></div>
+    </nav>
+    <main class="content" id="content">
+      <!-- active view renders here -->
+    </main>
+  </div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

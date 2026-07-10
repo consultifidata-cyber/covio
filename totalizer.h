@@ -32,23 +32,71 @@ struct __attribute__((packed)) Checkpoint {
   uint32_t boot_id;
   uint32_t seq;        // last telemetry seq committed (see telemetry.h)
   uint32_t writes;     // monotonically increasing -> newest slot wins
+  // ---- ADR-003 (Phase 2): persisted queue write-offset -------------------
+  // "Last known good write offset" for EventQueue's active segment, reusing
+  // this struct's existing dual-slot CRC checkpoint mechanism (see
+  // Docs/PHASE2_DESIGN_REPORT.md §3.2). Set via setQueueOffset() below.
+  // NOT YET CONSUMED by append()/truncate-before-append logic — that
+  // consumer is a later Phase 2 task (P2-T5).
+  uint32_t q_segment;  // active segment id the offset below applies to
+  uint32_t q_offset;   // byte offset of the last confirmed-good write in it
   uint32_t crc32;      // over all prior bytes
+};
+
+// ---- ADR-003 (Phase 2) MIGRATION ONLY: pre-Phase-2 checkpoint layout ------
+// 28 bytes -- the exact on-disk shape every device wrote before this
+// upgrade. READ-ONLY: nothing after Phase 2 ever writes this layout again.
+// Exists solely so an upgrading device's `total` (lifetime pulse count) is
+// never silently zeroed by the new Checkpoint's size change -- see
+// Totalizer::loadLegacy_() below.
+struct __attribute__((packed)) LegacyCheckpoint {
+  uint32_t magic;
+  uint64_t total;
+  uint32_t boot_id;
+  uint32_t seq;
+  uint32_t writes;
+  uint32_t crc32;
 };
 
 class Totalizer {
 public:
   void begin(uint32_t bootId) {
     setupPCNT_();
-    // recover newest CRC-valid checkpoint from either slot
+    // Recover newest CRC-valid checkpoint from either slot. Each slot is
+    // tried as the NEW format first; only if that fails is it tried as the
+    // pre-Phase-2 LEGACY format (loadLegacy_ upconverts it in-memory,
+    // preserving total/boot_id/seq/writes and defaulting the two new
+    // fields to 0 -- safe here because a genuine pre-Phase-2 device has no
+    // seg_*.bin files yet at the moment of this migration).
     Checkpoint a, b;
     bool va = load_(CKPT_PATH_A, a);
     bool vb = load_(CKPT_PATH_B, b);
-    if (va && vb) cp_ = (a.writes >= b.writes) ? a : b;
-    else if (va)  cp_ = a;
-    else if (vb)  cp_ = b;
-    else { memset(&cp_, 0, sizeof(cp_)); cp_.magic = CKPT_MAGIC; }
+    bool legA = false, legB = false;
+    if (!va) { va = loadLegacy_(CKPT_PATH_A, a); legA = va; }
+    if (!vb) { vb = loadLegacy_(CKPT_PATH_B, b); legB = vb; }
+
+    bool usedLegacy;
+    if (va && vb) {
+      bool useA = (a.writes >= b.writes);
+      cp_ = useA ? a : b;
+      usedLegacy = useA ? legA : legB;
+    }
+    else if (va) { cp_ = a; usedLegacy = legA; }
+    else if (vb) { cp_ = b; usedLegacy = legB; }
+    else { memset(&cp_, 0, sizeof(cp_)); cp_.magic = CKPT_MAGIC; usedLegacy = false; }
+
     cp_.boot_id = bootId;
     base_ = cp_.total;          // total accumulated before this power-up
+
+    if (usedLegacy) {
+      // Re-persist immediately in the NEW format so the legacy layout is
+      // retired as soon as possible. Idempotent and safe if interrupted --
+      // dual-slot CRC guarantees the untouched legacy slot survives a crash
+      // here, and loadLegacy_() simply succeeds again on the next boot.
+      Serial.printf("[TOT] migrated legacy checkpoint -> total preserved = %llu\n",
+                    (unsigned long long)base_);
+      persist_();
+    }
     Serial.printf("[TOT] recovered total=%llu writes=%u\n",
                   (unsigned long long)base_, cp_.writes);
   }
@@ -77,6 +125,18 @@ public:
   }
 
   uint32_t lastSeq() { return cp_.seq; }
+
+  // ---- ADR-003 (Phase 2): queue write-offset checkpoint accessors --------
+  // setQueueOffset() persists synchronously (same pattern as ackThrough()'s
+  // synchronous persist in queue.h) via the existing dual-slot CRC persist_().
+  // The getters serve EventQueue::begin()'s recovery step.
+  void setQueueOffset(uint32_t segment, uint32_t offset) {
+    cp_.q_segment = segment;
+    cp_.q_offset  = offset;
+    persist_();
+  }
+  uint32_t queueOffsetSegment() const { return cp_.q_segment; }
+  uint32_t queueOffsetOffset()  const { return cp_.q_offset; }
 
 private:
   void setupPCNT_() {
@@ -121,6 +181,36 @@ private:
     bool ok = (crc32_((uint8_t*)&out, sizeof(out)) == want);
     out.crc32 = want;
     return ok;
+  }
+
+  // ADR-003 (Phase 2) migration: loads and validates an OLD-format (28-byte)
+  // checkpoint at `path`. On success, upconverts it into a NEW-format
+  // Checkpoint (`out`), preserving total/boot_id/seq/writes exactly and
+  // defaulting q_segment/q_offset to 0. `out.crc32` is left 0 here -- this
+  // is an in-memory, not-yet-persisted value; persist_() computes and sets
+  // it when begin() re-persists this in the new format.
+  bool loadLegacy_(const char* path, Checkpoint& out) {
+    File f = SD.open(path, FILE_READ);
+    if (!f || f.size() != sizeof(LegacyCheckpoint)) { if (f) f.close(); return false; }
+    LegacyCheckpoint legacy;
+    f.read((uint8_t*)&legacy, sizeof(legacy));
+    f.close();
+    if (legacy.magic != CKPT_MAGIC) return false;
+    uint32_t want = legacy.crc32;
+    legacy.crc32 = 0;
+    bool ok = (crc32_((uint8_t*)&legacy, sizeof(legacy)) == want);
+    if (!ok) return false;
+
+    memset(&out, 0, sizeof(out));
+    out.magic     = CKPT_MAGIC;
+    out.total     = legacy.total;
+    out.boot_id   = legacy.boot_id;
+    out.seq       = legacy.seq;
+    out.writes    = legacy.writes;   // preserved -> A/B alternation parity
+                                      // stays continuous across the upgrade
+    out.q_segment = 0;
+    out.q_offset  = 0;
+    return true;
   }
 
   void persist_() {

@@ -20,9 +20,9 @@
 | Blocked Phases | None |
 | Open ACRs | None |
 | Current Branch | *(repository is not yet under git version control — initialize per `MASTER_GOVERNANCE.md` §5 before Phase 0 work begins)* |
-| Current ADR Version | v1.0 |
+| Current ADR Version | v1.1 — `ADR-017`/`ADR-018` added (DM-Phase 1.8, Covio Device Manager Live Readiness Plan); both **`APPROVED` 2026-07-09** — see the ADR document's "Post-Freeze Supersession" section. DM-Phase 2 implementation authorized. |
 | Current Schema Version | 1 |
-| Last Reviewed | 2026-07-08 |
+| Last Reviewed | 2026-07-09 |
 | Architecture Owner | _____________ |
 | Implementation Owner | _____________ |
 

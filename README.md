@@ -7,28 +7,31 @@ End-to-end: ESP32 counts pulses → persists a crash-safe totalizer → queues t
 ```
 covio_firmware/
 ├── covio_firmware.ino     main loop + boot sequence
+├── config.h               <-- THE ONLY FILE YOU EDIT per deployment
+├── store.h                NVS globals (url, key, wifi, versions, boot_id)
+├── totalizer.h            PCNT counter + dual-slot CRC checkpoint on SD
+├── queue.h                append-only SD queue + acked-through pointer
+├── telemetry.h            record builder + push JSON (raw-pulses model)
+├── sync.h                 wifi + push/ACK + K-factor config poll
+├── provision.h            serial console (set url/key/wifi, factory reset)
+├── ota.h                  pull OTA + rollback (HTTPS/signing notes inside)
+├── platformio.ini         PlatformIO build config (points at this root layout)
 ├── IMPLEMENTATION_AND_TESTING.md   step-by-step bring-up, tests, remote setup
 ├── ARCHITECTURE.md        full design reference + API contract
-├── src/
-│   ├── config.h           <-- THE ONLY FILE YOU EDIT per deployment
-│   ├── store.h            NVS globals (url, key, wifi, versions, boot_id)
-│   ├── totalizer.h        PCNT counter + dual-slot CRC checkpoint on SD
-│   ├── queue.h            append-only SD queue + acked-through pointer
-│   ├── telemetry.h        record builder + push JSON (raw-pulses model)
-│   ├── sync.h             wifi + push/ACK + K-factor config poll
-│   ├── provision.h        serial console (set url/key/wifi, factory reset)
-│   └── ota.h              pull OTA + rollback (HTTPS/signing notes inside)
 └── server/
     └── server.py          Flask+SQLite stub: push/ACK/config/OTA + K-factor UI
 ```
 
-Arduino IDE compiles `.h` files sitting next to the `.ino`. Put the contents of `src/` **in the same folder** as `covio_firmware.ino` (flatten it), or use PlatformIO with `src/`.
+Per ADR-013, this root-level flat layout is the single source of truth — there
+is no separate `src/` copy to keep in sync. Arduino IDE compiles `.h` files
+sitting next to the `.ino` directly, with nothing to flatten first. PlatformIO
+also builds directly against this same root layout (see `platformio.ini`).
 
 ## Build & flash (one time, over USB)
 
 1. **Board:** ESP32 Dev Module.
 2. **Partition Scheme:** an OTA-capable one — **"Minimal SPIFFS (1.9MB APP with OTA)"**. Without two app slots, OTA cannot work.
-3. Edit `src/config.h`: set `DEFAULT_WIFI_SSID/PASS`, and `DEFAULT_SERVER_URL` to your server host (e.g. `http://192.168.1.100:8000`).
+3. Edit `config.h`: set `DEFAULT_WIFI_SSID/PASS`, and `DEFAULT_SERVER_URL` to your server host (e.g. `http://192.168.1.100:8000`).
 4. Flash on USB (buck off VIN — your Rule R2). After this first flash, all future updates go over WiFi.
 
 ## Run the server

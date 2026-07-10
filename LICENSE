@@ -1,0 +1,27 @@
+LICENSE — PENDING OWNER DECISION
+==================================
+
+No license has been chosen for this project yet.
+
+This file is a placeholder created as part of RE-1 (Release Engineering,
+Repository Hygiene & Governance Foundation) so that repository tooling
+(GitHub's own license detection, dependency/compliance scanners, etc.) has
+a LICENSE file to find, and so the absence of a license is visible and
+explicit rather than silent.
+
+Choosing a license is a business/legal decision, not an engineering one,
+and has deliberately NOT been made here. Relevant existing signal: the
+Windows desktop app's `tools/device-manager/package.json` currently
+declares `"license": "UNLICENSED"` and `"private": true`, which is
+consistent with — but not a substitute for — an explicit decision at the
+project level.
+
+Until an owner decision is recorded here, treat this codebase as
+**all rights reserved**: no permission is granted to copy, modify,
+distribute, or use this software outside of what the repository owner
+has separately, explicitly authorized.
+
+ACTION REQUIRED: the repository owner should replace this file with the
+actual chosen license text (e.g. MIT, Apache-2.0, a proprietary/commercial
+license, etc.) or explicitly confirm "all rights reserved, no open license"
+as the final decision.

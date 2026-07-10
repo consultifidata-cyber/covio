@@ -26,9 +26,11 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include "store.h"
 #include "queue.h"
 #include "telemetry.h"
+#include "certs.h"
 
 class Sync {
 public:
@@ -39,10 +41,28 @@ public:
     WiFi.mode(WIFI_STA);
     WiFi.begin(st_->wifiSsid().c_str(), st_->wifiPass().c_str());
     Serial.printf("[NET] connecting to %s\n", st_->wifiSsid().c_str());
+    // DM-Phase 5 (ADR-005): "state the limitation to operators, don't hide
+    // it" -- a device still configured with a plain http:// server_url is
+    // running without transport encryption or CA pinning. Fine for bench
+    // iteration (this is exactly what DEFAULT_SERVER_URL is for); must be
+    // https:// before any field deployment. Logged once per boot here,
+    // not on every reconnect attempt.
+    if (!covioIsHttpsUrl(st_->serverUrl())) {
+      Serial.println("[SECURITY] server_url is http:// (unencrypted, unpinned) -- "
+                      "bench/dev only. Must be https:// before field deployment (ADR-005).");
+    }
   }
+
+  // DM-Phase 2 (ADR-017 WiFi-authority consolidation): while true, this
+  // module's own reconnect logic below is a no-op -- set by
+  // covio_firmware.ino exactly while wifi_provision.h owns WiFi connection
+  // decisions (AP-fallback active), so the two never independently call
+  // WiFi.begin() at the same time with different credentials.
+  void setWifiAuthorityPaused(bool paused) { wifiAuthorityPaused_ = paused; }
 
   // Non-blocking WiFi keepalive with exponential backoff + jitter.
   void wifiService() {
+    if (wifiAuthorityPaused_) return;
     if (WiFi.status() == WL_CONNECTED) { backoff_ = WIFI_RETRY_MS; return; }
     uint32_t now = millis();
     if (now - lastWifiTry_ < backoff_) return;
@@ -56,6 +76,19 @@ public:
 
   bool online() { return WiFi.status() == WL_CONNECTED; }
 
+  // ---- DM-Phase 1 (local diagnostics, §13 A.3 /api/v1/status) ----
+  // Getters only -- these retain values pushOnce()/pollConfig() already
+  // compute but previously only logged. No change to push/ack/poll decision
+  // logic. Named "Sync", not "Ack": §13 A.3 defines last_sync_ms_ago as
+  // null only if "no successful push/config-poll yet this boot" -- i.e. it
+  // tracks the more recent of EITHER a confirmed push ack OR a 200 from
+  // pollConfig(), not push-acks alone (validation-pass correction).
+  bool     haveSync()         { return haveSync_; }
+  uint32_t lastSyncMs()       { return lastSyncMs_; }
+  bool     havePush()         { return lastPushHttpCode_ != -1; }
+  int      lastPushHttpCode() { return lastPushHttpCode_; }
+  uint32_t lastPushRttMs()    { return lastPushRttMs_; }   // valid whenever havePush() is true
+
   // ---- Push queued records; prune on cumulative ack_seq ----
   // Returns true if at least one record was acked this call.
   bool pushOnce() {
@@ -65,14 +98,29 @@ public:
     if (n == 0) return false;
 
     String body = Telemetry::toJson(*st_, batch, n);
-    HTTPClient http;
     String url = st_->serverUrl() + PATH_PUSH;
-    if (!http.begin(url)) { Serial.println("[SYNC] begin failed"); return false; }
+
+    // DM-Phase 5 (ADR-005): https:// uses a pinned-CA WiFiClientSecure --
+    // never setInsecure() (permanently forbidden by ADR-005). http:// keeps
+    // using the plain WiFiClient path exactly as before, for the bench stub.
+    HTTPClient http;
+    WiFiClientSecure secureClient;
+    bool began;
+    if (covioIsHttpsUrl(url)) {
+      secureClient.setCACert(COVIO_PINNED_CA_CERT);
+      began = http.begin(secureClient, url);
+    } else {
+      began = http.begin(url);
+    }
+    if (!began) { Serial.println("[SYNC] begin failed"); return false; }
     http.addHeader("Content-Type", "application/json");
     http.addHeader("X-Api-Key", st_->apiKey());
     http.setTimeout(8000);
 
+    uint32_t rttStart = millis();           // DM-Phase 1: §13 A.3 network_rtt_ms
     int code = http.POST(body);
+    lastPushRttMs_ = millis() - rttStart;   // measured regardless of the code returned
+    lastPushHttpCode_ = code;              // DM-Phase 1: getter only, no behavior change
     if (code != 200) {
       Serial.printf("[SYNC] push HTTP %d — keeping queue\n", code);
       http.end();
@@ -88,6 +136,8 @@ public:
       return false;                       // bare 200 is not an ack (Invariant 6)
     }
     q_->ackThrough((uint32_t)ackSeq, st_->bootId());
+    lastSyncMs_ = millis();                // DM-Phase 1: getter only, no behavior change
+    haveSync_   = true;
     Serial.printf("[SYNC] acked_seq=%ld (sent %d)\n", ackSeq, n);
     return true;
   }
@@ -95,13 +145,28 @@ public:
   // ---- Poll K-factor / calibration config ----
   void pollConfig() {
     if (!online()) return;
-    HTTPClient http;
     String url = st_->serverUrl() + PATH_CONFIG;
-    if (!http.begin(url)) return;
+
+    // DM-Phase 5 (ADR-005): same scheme dispatch as pushOnce() above.
+    HTTPClient http;
+    WiFiClientSecure secureClient;
+    bool began;
+    if (covioIsHttpsUrl(url)) {
+      secureClient.setCACert(COVIO_PINNED_CA_CERT);
+      began = http.begin(secureClient, url);
+    } else {
+      began = http.begin(url);
+    }
+    if (!began) return;
     http.addHeader("X-Api-Key", st_->apiKey());
     http.setTimeout(6000);
     int code = http.GET();
     if (code == 200) {
+      // DM-Phase 1: a 200 here is itself a successful sync event (§13 A.3's
+      // "no successful push/config-poll" null condition) regardless of
+      // whether the K-factor version actually changed below.
+      lastSyncMs_ = millis();
+      haveSync_   = true;
       String r = http.getString();
       long ver = extractLong_(r, "version");
       float k  = extractFloat_(r, "K_factor");
@@ -144,4 +209,13 @@ private:
   EventQueue* q_ = nullptr;
   uint32_t lastWifiTry_ = 0;
   uint32_t backoff_ = WIFI_RETRY_MS;
+  bool     wifiAuthorityPaused_ = false;   // DM-Phase 2: see setWifiAuthorityPaused()
+
+  // ---- DM-Phase 1 (local diagnostics) ----
+  bool     haveSync_ = false;         // millis() 0 is a valid timestamp, so a
+                                       // separate flag distinguishes "never
+                                       // synced" from "synced at boot".
+  uint32_t lastSyncMs_ = 0;           // last successful push-ack OR config-poll 200
+  int      lastPushHttpCode_ = -1;    // -1 = no push attempted yet this boot
+  uint32_t lastPushRttMs_ = 0;        // DM-Phase 1: valid iff lastPushHttpCode_ != -1
 };

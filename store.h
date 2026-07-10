@@ -42,6 +42,18 @@ public:
   void   setServerUrl(const String& v) { p_.putString("server_url", v); }
   void   setApiKey   (const String& v) { p_.putString("api_key",    v); }
 
+  // ---- DM-Phase 6 (§11.2 / ADR-018): Logical Device ID, the manufacturing-
+  // serial identity tier. "" (empty string, the NVS default for an absent
+  // key) is this field's "unassigned" state -- diagnostics.h maps "" to
+  // JSON null (§13 A.3's frozen "logical_device_id": null contract,
+  // implemented since DM-Phase 1, populated for real starting here).
+  // Write-once enforcement is the CALLER's job (local_api.h's new factory
+  // endpoint), not this accessor's -- store.h has never enforced business
+  // rules for any other field either (setApiKey/setServerUrl are equally
+  // unconditional), staying a pure NVS accessor throughout.
+  String logicalDeviceId()                    { return p_.getString("logical_id", ""); }
+  void   setLogicalDeviceId(const String& v)  { p_.putString("logical_id", v); }
+
   // ---- wifi ----
   String wifiSsid()    { return p_.getString("wifi_ssid", DEFAULT_WIFI_SSID); }
   String wifiPass()    { return p_.getString("wifi_pass", DEFAULT_WIFI_PASS); }

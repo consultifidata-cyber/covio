@@ -1,0 +1,19 @@
+{
+  // RE-8 (Release Engineering -- Developer Onboarding & Reproducible
+  // Environment). See SETUP.md's own "VS Code extensions" section for why
+  // each of these is recommended. This is the ONLY .vscode/ file tracked
+  // in this repository -- the root .gitignore un-ignores this one file
+  // specifically (matching the existing !.env.example pattern); every
+  // other .vscode/ file (settings.json, launch.json, etc.) stays
+  // per-developer/local and untracked, by design.
+  "recommendations": [
+    "platformio.platformio-ide",
+    "ms-vscode.cpptools",
+    "ms-python.python",
+    "charliermarsh.ruff",
+    "dbaeumer.vscode-eslint",
+    "esbenp.prettier-vscode",
+    "editorconfig.editorconfig",
+    "redhat.vscode-yaml"
+  ]
+}

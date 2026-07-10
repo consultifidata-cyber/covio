@@ -14,10 +14,14 @@
 //   set wifi <ssid> <pass>    change WiFi (no spaces in ssid — limitation)
 //   reboot                    restart now
 //   factory                   wipe NVS (re-seeds from config.h defaults) + reboot
+//   provision                 re-enter AP-mode setup on next boot (DM-Phase 2,
+//                             NOT a factory reset -- existing wifi/server/key
+//                             values and all queue/totalizer state are untouched)
 // ============================================================================
 #pragma once
 #include <Arduino.h>
 #include "store.h"
+#include "wifi_provision.h"
 
 class Provision {
 public:
@@ -37,7 +41,7 @@ private:
   void handle_(String line) {
     line.trim();
     if (line == "help") {
-      Serial.println("cmds: show | set url <u> | set key <k> | set wifi <ssid> <pass> | reboot | factory");
+      Serial.println("cmds: show | set url <u> | set key <k> | set wifi <ssid> <pass> | reboot | factory | provision");
     } else if (line == "show") {
       Serial.printf("device_id : %s\n", st_->deviceId().c_str());
       Serial.printf("fw        : %s\n", FW_VERSION);
@@ -65,6 +69,15 @@ private:
     } else if (line == "factory") {
       Serial.println("[PROV] factory reset: wiping NVS, rebooting...");
       st_->factoryReset(); delay(200); ESP.restart();
+    } else if (line == "provision") {
+      // DM-Phase 2: re-enter AP-mode setup on next boot, without a factory
+      // reset -- wifi/server/key values and all SD-persisted queue/totalizer
+      // state are completely untouched by this (they live on the SD card,
+      // never reachable by anything a WiFi-mode change does).
+      Serial.println("[PROV] will re-enter AP-mode setup on next boot. Rebooting...");
+      WifiProvision::requestReprovision();
+      delay(200);
+      ESP.restart();
     } else {
       Serial.println("[PROV] unknown. type: help");
     }

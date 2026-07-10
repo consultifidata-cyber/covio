@@ -1,0 +1,122 @@
+name: Desktop Package
+
+# RE-6 (Release Engineering -- Desktop Packaging & Windows Installer). See
+# Docs/DESKTOP_PACKAGING.md for the full architecture/policy this file
+# implements.
+#
+# Deliberately a SEPARATE workflow from .github/workflows/ci.yml (RE-6's
+# own explicit scope: "keep release packaging separate from CI") -- ci.yml
+# stays a fast push/PR verification loop (lint, test, firmware compile);
+# packaging (NSIS + portable + checksums) is a slower, release-adjacent
+# concern that does not need to run on every push. Manually triggered only
+# for now (workflow_dispatch) -- wiring this to tag pushes as part of a
+# full release pipeline is RE-7's own decision to make, not presumed here
+# (matching the same "don't design the next phase's workflow inside this
+# one" discipline RE-4's own audit already established for RE-7).
+#
+# Does NOT publish a GitHub Release (RE-6's explicit scope) -- artifacts
+# are uploaded as workflow artifacts only, for manual download/review.
+
+on:
+  workflow_dispatch: {}
+  # RE-7 (Automated GitHub Releases): makes this workflow reusable via
+  # `uses: ./.github/workflows/desktop-package.yml` from release.yml,
+  # per RE-7's own "reuse existing workflows instead of duplicating build
+  # logic" requirement. `release_version`, when provided, is consumed only
+  # by the new "Stamp release version" step below -- a normal
+  # workflow_dispatch run never sets it, so package.json's version is left
+  # completely untouched in every case except an actual release build.
+  workflow_call:
+    inputs:
+      release_version:
+        description: >-
+          Version (no "v" prefix, e.g. "1.2.3") to stamp into
+          package.json's "version" field before packaging. Omit for a
+          normal manual run, which packages whatever version is already
+          committed.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package Windows Desktop App
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: tools/device-manager
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: tools/device-manager/package-lock.json
+
+      - name: Stamp release version into package.json (release builds only)
+        # RE-7: only runs when this workflow is CALLED (workflow_call) with
+        # release_version set -- a normal workflow_dispatch run never sets
+        # it, so package.json is left completely untouched otherwise. Uses
+        # `npm version` (not a raw sed/regex against JSON) specifically to
+        # avoid any risk of corrupting package.json's structure --
+        # --no-git-tag-version because this is an ephemeral, never-committed
+        # edit in the CI checkout, not a real repository change;
+        # --allow-same-version so re-running against an already-matching
+        # version (e.g. a retried workflow run) doesn't error.
+        if: ${{ inputs.release_version != '' }}
+        working-directory: tools/device-manager
+        run: npm version ${{ inputs.release_version }} --no-git-tag-version --allow-same-version
+
+      - name: Install dependencies (npm ci)
+        run: npm ci
+
+      # Packaging should only ever run against code that already passes
+      # ci.yml's own gates -- re-verified here rather than assumed, since
+      # this workflow can also be triggered independently of any specific
+      # CI run having already passed for this exact commit.
+      - name: Test
+        run: npm test
+
+      - name: Lint (ESLint)
+        run: npm run lint
+
+      - name: Build installer + portable package (electron-builder)
+        # Builds both configured win targets (nsis, portable) per
+        # package.json's build.win.target, with artifactName matching
+        # Docs/RELEASE_VERSIONING.md, and generates a .sha256 file next to
+        # each via the afterAllArtifactBuild hook (scripts/afterAllArtifactBuild.js).
+        # No CSC_LINK/CSC_KEY_PASSWORD secrets are configured for this
+        # repository yet -- electron-builder's own default behavior skips
+        # code signing when they're absent (forceCodeSigning: false in
+        # package.json makes this explicit rather than relying on silent
+        # default behavior). See Docs/DESKTOP_PACKAGING.md.
+        run: npm run dist
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+
+      - name: Upload installer + checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: |
+            tools/device-manager/dist/covio-device-manager-setup-*.exe
+            tools/device-manager/dist/covio-device-manager-setup-*.exe.sha256
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Upload portable package + checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-portable
+          path: |
+            tools/device-manager/dist/covio-device-manager-v*-portable.exe
+            tools/device-manager/dist/covio-device-manager-v*-portable.exe.sha256
+          retention-days: 14
+          if-no-files-found: error

@@ -1,0 +1,12 @@
+# requirements-dev.txt -- RE-3 (Release Engineering, Code Quality Gates).
+# Development-only tooling for the backend (server/, test/native/) -- never
+# needed to actually RUN server.py (see README.md's own `pip install flask`
+# instruction for that). Install with: pip install -r requirements-dev.txt
+#
+# Version left as a loose lower-bound rather than an exact pin: no Python
+# interpreter/pip has been available in any environment this project has
+# been developed in so far (see VERSIONS.md), so an exact pin here would be
+# an unverified guess. To be tightened to an exact, CI-verified version
+# once RE-4's CI runner (which does have Python preinstalled) actually
+# installs and runs this for the first time.
+ruff>=0.6.0

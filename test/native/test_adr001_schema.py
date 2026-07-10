@@ -46,10 +46,15 @@ class Adr001SchemaAcceptanceTests(unittest.TestCase):
         os.unlink(self._tmp.name)
 
     def _push(self, records, device_id="test-device"):
+        # DM-Phase 0B: push now requires X-Api-Key. Using the bootstrap
+        # default key here (not a hardcoded second copy of the string)
+        # keeps this test exercising ADR-001's schema-acceptance logic
+        # specifically -- it is not itself a test of authentication.
         return self.client.post(
             "/api/iot/flow/push",
             data=json.dumps(make_batch(records, device_id)),
             content_type="application/json",
+            headers={"X-Api-Key": server.BOOTSTRAP_DEFAULT_API_KEY},
         )
 
     def _quarantine_count(self):

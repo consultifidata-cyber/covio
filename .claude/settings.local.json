@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile server/server.py)",
+      "Bash(python -m unittest discover -s test/native -v)",
+      "Bash(git add *)",
+      "Bash(git commit -q -m ' *)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(gh api *)",
+      "WebFetch(domain:esp32.com)"
+    ]
+  }
+}

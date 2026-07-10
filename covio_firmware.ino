@@ -25,13 +25,17 @@
 #include "sync.h"
 #include "ota.h"
 #include "provision.h"
+#include "local_api.h"
+#include "wifi_provision.h"
 
-Store      store;
-Totalizer  totalizer;
-EventQueue eventQueue;
-Sync       syncEngine;
-Ota        ota;
-Provision  provision;
+Store         store;
+Totalizer     totalizer;
+EventQueue    eventQueue;
+Sync          syncEngine;
+Ota           ota;
+Provision     provision;
+LocalApi      localApi;         // DM-Phase 1: read-only local diagnostics API
+WifiProvision wifiProvision;    // DM-Phase 2: SoftAP + captive-portal provisioning
 
 uint32_t seq = 0;              // GLOBALLY monotonic telemetry sequence
 uint32_t tTelemetry = 0, tPush = 0, tConfig = 0, tOta = 0;
@@ -49,6 +53,24 @@ void setup() {
                 store.deviceId().c_str(), store.bootId());
   Serial.println("(serial console ready — type 'help')");
 
+  // DM-Phase 5 (ADR-005 Definition of Done: "no device leaves the factory
+  // floor with the default API key active"). RELEASE_BUILD is 0 for every
+  // bench/dev build (config.h's own default), so this guard never fires
+  // outside a real factory/release build -- reuses diagnostics.h's own
+  // existing apiKeyStatus_() check rather than a second inline comparison
+  // (local_api.h already pulls diagnostics.h into this translation unit).
+  // Mirrors the SD-init-failure halt pattern immediately below: loud FATAL
+  // message, console stays serviceable so the key can still be fixed.
+#if RELEASE_BUILD
+  if (Diagnostics::apiKeyStatus_(store) == "default") {
+    Serial.println("[FATAL] RELEASE_BUILD=1 but the device still has the "
+                    "default API key -- factory provisioning did not "
+                    "complete. Refusing normal operation.");
+    Serial.println("        (console still active: 'set key <apikey>' works)");
+    while (true) { provision.service(); delay(50); }
+  }
+#endif
+
   // 2) SD — the queue and totalizer both live here. Fail loud if absent.
   if (!SD.begin(PIN_SD_CS, SPI, 4000000)) {
     Serial.println("[FATAL] SD init failed — cannot persist. Halting.");
@@ -59,7 +81,14 @@ void setup() {
 
   // 3) recover totalizer + queue state from SD
   totalizer.begin(store.bootId());
-  eventQueue.begin();
+  // ADR-003 (Phase 2): totalizer.begin() has already recovered the queue
+  // write-offset checkpoint (q_segment/q_offset) by this point, so passing
+  // &totalizer here is safe -- EventQueue::begin() reads it immediately
+  // (cleanupOrphanSegments_) and append()/pending()/ackThrough() read it on
+  // every subsequent call. This activates the segment-based queue path;
+  // the pre-Phase-2 single-file (*Legacy_) methods are no longer reached
+  // during normal operation.
+  eventQueue.begin(&totalizer);
   seq = totalizer.lastSeq();          // continue GLOBAL seq across reboots
 
   // 4) network + OTA trial-state check
@@ -67,6 +96,41 @@ void setup() {
   ota.noteBoot();                     // "am I a freshly-OTA'd image on trial?"
   syncEngine.begin(&store, &eventQueue);
   syncEngine.wifiConnect();
+
+  // DM-Phase 2: bounded boot-time wait for the station connection just
+  // kicked off above to resolve, before deciding between normal operation
+  // and AP-fallback provisioning mode (§3.1's "bounded timeout" reasoning).
+  // Mirrors this file's own existing SD-init-failure blocking-with-service
+  // pattern above -- a one-time boot-phase wait, never recurring, so it does
+  // not affect the steady-state 1-second telemetry cadence once past this
+  // point. `provision` console command requests are consumed here too, so
+  // an explicit re-provision always takes the same code path as a genuine
+  // connect failure.
+  bool forceAp = WifiProvision::consumeReprovisionRequest();
+  uint32_t staWaitStart = millis();
+  while (!forceAp && WiFi.status() != WL_CONNECTED &&
+         millis() - staWaitStart < AP_FALLBACK_TIMEOUT_MS) {
+    provision.service();
+    syncEngine.wifiService();
+    delay(50);
+  }
+
+  if (!forceAp && WiFi.status() == WL_CONNECTED) {
+    // DM-Phase 1: local diagnostics API. Bound after wifiConnect() so the
+    // getters it reads (queue backlog, ota state, etc.) are all already wired;
+    // its own mDNS start is deferred internally until the STA connection is
+    // actually confirmed (local_api.h's own service() logic).
+    localApi.begin(&store, &totalizer, &eventQueue, &syncEngine, &ota);
+  } else {
+    // DM-Phase 2: station connection did not succeed within the bounded
+    // wait above, or `provision` explicitly requested re-entry -- fall back
+    // to SoftAP + captive portal. Sync's own reconnect authority is paused
+    // for the duration so its background retries never race
+    // wifi_provision.h's own WiFi.begin() calls while testing
+    // operator-submitted credentials (ADR-017 WiFi-authority consolidation).
+    syncEngine.setWifiAuthorityPaused(true);
+    wifiProvision.begin(&store);
+  }
 
 #if SIM_PULSES
   pinMode(PIN_SIM, OUTPUT);
@@ -81,7 +145,24 @@ void setup() {
 void loop() {
   uint32_t now = millis();
   provision.service();                // serial console (help/show/set/...)
-  syncEngine.wifiService();                 // keep WiFi up (non-blocking, backoff)
+  syncEngine.wifiService();                 // keep WiFi up (non-blocking, backoff); no-op while AP authority is paused
+
+  // DM-Phase 2: while provisioning mode is active, localApi has never been
+  // begin()'d in this boot path (see setup() above) -- service only the
+  // provisioning path and skip everything below that assumes normal
+  // operation is running.
+  if (wifiProvision.active()) {
+    if (wifiProvision.service()) {
+      // Station WiFi just confirmed while AP mode was active -- hand WiFi
+      // authority back to Sync and start normal-operation local diagnostics.
+      syncEngine.setWifiAuthorityPaused(false);
+      localApi.begin(&store, &totalizer, &eventQueue, &syncEngine, &ota);
+    }
+    delay(5);
+    return;
+  }
+
+  localApi.service();                 // DM-Phase 1: handle any pending local HTTP request
 
 #if SIM_PULSES
   // Software square wave on GPIO25 for bench tests. Pauses during blocking
@@ -131,7 +212,7 @@ void loop() {
   // ---- check for firmware updates ----
   if (now - tOta >= OTA_POLL_MS) {
     tOta = now;
-    ota.poll();                       // may download + reboot into new image
+    ota.poll(syncEngine.online());    // DM-Phase 2: WiFi-authority consolidation -- may download + reboot into new image
   }
 
   delay(5);                           // yield
