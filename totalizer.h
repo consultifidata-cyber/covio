@@ -21,6 +21,7 @@
 #include <LittleFS.h>
 #include "driver/pcnt.h"
 #include "config.h"
+#include "queue_offset_checkpoint.h"
 
 #define PCNT_UNIT_USED   PCNT_UNIT_0
 #define CKPT_MAGIC       0xC0A17071UL
@@ -59,7 +60,17 @@ struct __attribute__((packed)) LegacyCheckpoint {
   uint32_t crc32;
 };
 
-class Totalizer {
+// RISK-04 phase-2 remediation: IQueueOffsetCheckpoint (the only three
+// Totalizer methods EventQueue/queue.h ever calls) now lives in its own
+// header (queue_offset_checkpoint.h), included above, specifically so it has
+// zero Arduino/hardware dependency and a native host test can supply a
+// FakeQueueOffsetCheckpoint instead of a real Totalizer (which depends on
+// the PCNT hardware peripheral and cannot be constructed off-target).
+// Totalizer's own behavior is completely unchanged by this -- it is a pure
+// "implements this interface too" addition, not a redesign; every existing
+// caller that uses a bare `Totalizer*`/`Totalizer&` continues to compile and
+// behave identically.
+class Totalizer : public IQueueOffsetCheckpoint {
 public:
   void begin(uint32_t bootId) {
     setupPCNT_();

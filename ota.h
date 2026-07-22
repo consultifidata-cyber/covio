@@ -44,6 +44,9 @@
 #include "esp_ota_ops.h"
 #include "store.h"
 #include "certs.h"
+#include "ota_version_policy.h"   // RISK-15 remediation (OTA anti-downgrade)
+#include "queue.h"                // for SCHEMA_VERSION_CURRENT (already #pragma once'd
+                                    // by the time ota.h is reached in covio_firmware.ino)
 
 // ---- DM-Phase 1 (local diagnostics, §13 A.4 ota_state enum) --------------
 enum OtaState { OTA_STATE_NONE, OTA_STATE_PENDING_VERIFY, OTA_STATE_CONFIRMED, OTA_STATE_FAILED };
@@ -85,6 +88,22 @@ public:
     esp_ota_mark_app_valid_cancel_rollback();
     confirmed_ = true;
     Serial.println("[OTA] new image confirmed valid — rollback cancelled");
+
+    // RISK-15 remediation (OTA anti-downgrade): the accepted security-
+    // version floor advances ONLY here -- once THIS running image has
+    // proven itself healthy, not at flash-write time and not merely on
+    // reboot. A candidate that never reaches this call (crashes, hangs,
+    // or is rolled back by the bootloader before ever proving healthy)
+    // never raises the floor -- "a failed candidate does not incorrectly
+    // lower [or raise] the accepted security floor" (mandate requirement).
+    // Monotonic: never LOWERS the floor even if this build's own
+    // FW_SECURITY_VERSION were somehow less than what's already stored
+    // (defensive; should not happen in normal operation, but a floor must
+    // never move backward for any reason).
+    if (st_ && FW_SECURITY_VERSION > (long)st_->securityVersion()) {
+      st_->setSecurityVersion((uint32_t)FW_SECURITY_VERSION);
+      Serial.printf("[OTA] security-version floor advanced to %d\n", FW_SECURITY_VERSION);
+    }
   }
 
   // Poll manifest; if a different version is offered, attempt the update.
@@ -133,9 +152,42 @@ public:
       return;                                     // already current
     }
 
+    // RISK-15 remediation (OTA anti-downgrade): build the candidate from
+    // the manifest's OWN fields and hand the actual ACCEPT/REJECT decision
+    // to evaluateOtaCandidate() (ota_version_policy.h) -- a pure function,
+    // host-tested independent of this network/flash-coupled method. A
+    // rejected candidate is logged and this call returns WITHOUT ever
+    // reaching doUpdate_() -- no download, no flash write, exactly the
+    // mandate's "device rejects before flashing" requirement.
+    OtaCandidate candidate;
+    long secVer = extractLong_(body, "security_version");
+    candidate.hasSecurityVersion = (secVer >= 0);
+    candidate.securityVersion = secVer;
+
+    String hwCompat = extractStr_(body, "hw_compat");
+    candidate.hasHwCompat = (hwCompat.length() > 0);
+    candidate.hwCompat = hwCompat.c_str();   // valid only for this call's lifetime -- fine, evaluateOtaCandidate() doesn't retain it
+
+    long schemaVer = extractLong_(body, "schema_version");
+    candidate.hasSchemaVersion = (schemaVer >= 0);
+    candidate.schemaVersion = schemaVer;
+
+    OtaVerdict verdict = evaluateOtaCandidate(candidate, st_->securityVersion(),
+                                               DEVICE_MODEL, SCHEMA_VERSION_CURRENT);
+    if (verdict != OTA_ACCEPT) {
+      Serial.printf("[OTA] REJECTED candidate %s: %s\n", ver.c_str(), otaVerdictStr(verdict));
+      lastRejectReason_ = verdict;
+      return;
+    }
+
     Serial.printf("[OTA] update offered: %s (running %s)\n", ver.c_str(), FW_VERSION);
     doUpdate_(bin);
   }
+
+  // DM-Phase 1 diagnostics: getter only, so /api/v1/status can report WHY
+  // the most recent candidate was rejected (if it was), not just that OTA
+  // is idle. RISK-15 remediation.
+  OtaVerdict lastRejectReason() { return lastRejectReason_; }
 
   // DM-Phase 2: promoted from private to public (no behavior/signature
   // change) so wifi_provision.h's /api/v1/config JSON handler can reuse this
@@ -151,6 +203,29 @@ public:
     i = s.indexOf('"', i); if (i < 0) return "";
     int j = s.indexOf('"', i+1); if (j < 0) return "";
     return s.substring(i+1, j);
+  }
+
+  // RISK-15 remediation: a small integer extractor for the new manifest
+  // fields (security_version/schema_version). Deliberately a SEPARATE tiny
+  // copy rather than sharing sync.h's private extractLong_ -- matches this
+  // codebase's own already-established, already-reviewed precedent of a
+  // per-class extractor rather than a shared parsing dependency (see this
+  // file's extractStr_ comment above, and MASTER_GOVERNANCE's note on this
+  // project having already paid once for that duplication and chosen to
+  // keep it that way). Returns -1 for "key absent, or value not a plain
+  // non-negative integer" -- evaluateOtaCandidate() treats -1 as
+  // "not present"/"malformed", never as a literal version number.
+  static long extractLong_(const String& s, const char* key) {
+    String pat = "\"" + String(key) + "\"";
+    int i = s.indexOf(pat);
+    if (i < 0) return -1;
+    i = s.indexOf(':', i);
+    if (i < 0) return -1;
+    i++;
+    while (i < (int)s.length() && (s[i] == ' ' || s[i] == '"')) i++;
+    long v = 0; bool any = false;
+    while (i < (int)s.length() && isdigit(s[i])) { v = v * 10 + (s[i] - '0'); i++; any = true; }
+    return any ? v : -1;
   }
 
 private:
@@ -194,4 +269,7 @@ private:
   bool pendingVerify_ = false;
   bool confirmed_ = false;
   bool failed_ = false;   // DM-Phase 1: outcome of the most recent doUpdate_() attempt
+  OtaVerdict lastRejectReason_ = OTA_ACCEPT;  // RISK-15: OTA_ACCEPT here means "nothing
+                                              // has been rejected yet this boot", not that
+                                              // a candidate was accepted -- see poll()
 };

@@ -15,6 +15,20 @@
 class Store {
 public:
   void begin() {
+    // RISK-15 remediation (OTA anti-downgrade): a SEPARATE NVS namespace,
+    // deliberately never touched by factoryReset() below. If the
+    // accepted-security-version floor lived in the same namespace as
+    // everything else, an ordinary factory reset would silently erase it --
+    // and a downgrade-after-reset is exactly the attack this floor exists
+    // to prevent (a stolen or "refurbished" device could otherwise be
+    // reset, then downgraded to an older, vulnerable image, then have its
+    // credentials re-provisioned). See ota_version_policy.h /
+    // Docs/audit/coviu_oil_meter_p0_remediation_phase2/04_OTA_ANTI_DOWNGRADE_DESIGN.md.
+    // A genuine secure factory-refurbishment procedure that legitimately
+    // needs to lower this floor is intentionally NOT implemented here --
+    // out of scope for this pass, would need its own authorized, audited
+    // mechanism, not a side effect of the existing consumer-facing reset.
+    p_sec_.begin(NVS_NS_SECURITY, false);
     p_.begin(NVS_NS, false);
     // On very first boot the keys are absent -> seed from build defaults.
     if (!p_.isKey("seeded")) {
@@ -75,7 +89,20 @@ public:
   float    tRef()                 { return p_.getFloat("tref",    15.0f); }
 
   // Wipe all NVS keys in our namespace; next boot re-seeds from config.h.
+  // RISK-15: deliberately does NOT clear the security-version floor
+  // namespace (p_sec_) -- see begin()'s comment above for why.
   void factoryReset() { p_.clear(); }
+
+  // ---- RISK-15 remediation (OTA anti-downgrade security-version floor) ----
+  // The highest FW_SECURITY_VERSION any firmware image has ever been
+  // CONFIRMED healthy on this device (see ota.h::confirmHealthyBoot()) --
+  // a durable software monotonic gate, not an eFuse-based hardware
+  // anti-rollback (burning eFuses is out of scope for this pilot stage;
+  // see the design doc for the explicit tradeoff this accepts: a physical
+  // NVS-partition erase via esptool could still reset this floor, which an
+  // eFuse-based mechanism would not permit -- documented, not hidden).
+  uint32_t securityVersion()              { return p_sec_.getUInt("sec_ver", 0); }
+  void     setSecurityVersion(uint32_t v) { p_sec_.putUInt("sec_ver", v); }
   void     setCalib(float k, float d, float tr) {
     p_.putFloat("kfactor", k); p_.putFloat("density", d); p_.putFloat("tref", tr);
   }
@@ -89,5 +116,6 @@ private:
     return String(buf);
   }
   Preferences p_;
+  Preferences p_sec_;   // RISK-15: separate namespace, survives factoryReset()
   uint32_t bootId_ = 0;
 };

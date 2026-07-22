@@ -18,6 +18,16 @@
 #define FW_VERSION            "1.0.0"
 #define DEVICE_MODEL          "covio-oilflow-v1"
 
+// ---- RISK-15 remediation (OTA anti-downgrade) --------------------------------
+// A SEPARATE, monotonically-increasing integer from FW_VERSION above. Bump
+// this ONLY when a release fixes a security-relevant defect (the kind of
+// thing a downgrade attack would want to undo) -- an ordinary feature
+// release with no security content does NOT need to bump it. ota.h rejects
+// any candidate manifest whose security_version is lower than the highest
+// value this device has ever confirmed healthy on (Store::securityVersion(),
+// a durable NVS-backed floor -- see store.h and ota_version_policy.h).
+#define FW_SECURITY_VERSION    1
+
 // ---- First-boot default endpoint (OVERRIDDEN by NVS after provisioning) -----
 // NOTE: use https:// in the field. sync.h/ota.h dispatch on server_url's own
 // scheme (covioIsHttpsUrl(), certs.h) and automatically use a pinned-CA
@@ -149,6 +159,11 @@
 
 // ---- NVS namespace ----------------------------------------------------------
 #define NVS_NS                "covio"     // all persisted globals live here
+// RISK-15 remediation: the security-version anti-downgrade floor lives in
+// its OWN namespace, deliberately never cleared by Store::factoryReset()
+// (see store.h) -- a downgrade-after-reset is exactly what this floor
+// defends against.
+#define NVS_NS_SECURITY        "covio_sec"
 
 // ---- DM-Phase 5 (ADR-005 Security Hardening) --------------------------------
 // Compile-time gate for a real factory/field release build. Left at 0 for

@@ -874,10 +874,26 @@ def config():
                    T_ref=row["t_ref"], version=row["version"])
 
 # ------------------------------------------------------------ OTA manifest
-# The manifest is a FILE you edit: server/firmware/manifest.json, e.g.
-#   {"version":"1.0.1","url":"http://<host>:8000/firmware/covio_firmware.ino.bin"}
+# The manifest is a FILE you edit: server/firmware/manifest.json.
+#
+# RISK-15 remediation (OTA anti-downgrade, ota_version_policy.h): as of this
+# phase, a candidate manifest SHOULD also carry security_version (integer),
+# hw_compat (string, matches config.h's DEVICE_MODEL), and schema_version
+# (integer, matches queue.h's SCHEMA_VERSION_CURRENT) -- a manifest missing
+# security_version is REJECTED by the device outright (ota.h's
+# evaluateOtaCandidate()), not silently treated as "no downgrade risk". A
+# manifest whose security_version is lower than the device's own accepted
+# floor is also rejected, regardless of the semantic `version` string.
+#   {"version":"1.0.1","url":"http://<host>:8000/firmware/covio_firmware.ino.bin",
+#    "security_version":1,"hw_compat":"covio-oilflow-v1","schema_version":1}
 # Drop the exported .bin in server/firmware/ next to it. No manifest file =
 # empty response = device sees "no update". FIELD: serve over HTTPS.
+# NOT implemented by this server: manifest signing / image hash verification
+# -- the device's TLS+CA-pinning is the only integrity guarantee on the
+# transport today (see ota.h's own top-of-file security banner, unchanged
+# by this phase). Anti-downgrade and cryptographic authenticity are
+# different, both-still-needed protections -- this phase closes ONLY the
+# former (RISK-15), not the latter (tracked separately, still ABSENT).
 FW_DIR = os.path.join(os.path.dirname(__file__), "firmware")
 os.makedirs(FW_DIR, exist_ok=True)
 

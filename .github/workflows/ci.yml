@@ -311,6 +311,49 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------
+  # RISK-04 phase-2 remediation: native C++ fault-injection tests against
+  # the REAL EventQueue::append()/FailureState logic in queue.h (see
+  # storage_backend.h and test/native_cpp/). No host C++ toolchain (g++/
+  # clang/MSVC) existed on the machine this test file was authored on --
+  # this job is what actually compiles and executes it, on a real ubuntu-
+  # latest runner which has g++ preinstalled by default. Until this job
+  # has run at least once (this workflow file's own first push/PR), these
+  # tests are written and statically reviewed but NOT YET PROVEN TO PASS
+  # -- see Docs/audit/coviu_oil_meter_p0_remediation_phase2/03_FLASH_FAULT_TEST_RESULTS.md
+  # for the honest, explicit statement of that gap.
+  # ---------------------------------------------------------------------
+  firmware-native-fault-injection:
+    name: Firmware Native Fault-Injection Tests
+    needs: repo-validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compile RISK-04 queue fault-injection test harness
+        working-directory: test/native_cpp
+        run: |
+          g++ --version
+          g++ -std=c++14 -Wall -DNATIVE_TEST -I. -I../.. \
+            test_queue_fault_injection.cpp arduino_shim.cpp \
+            -o test_queue_fault_injection
+
+      - name: Run RISK-04 queue fault-injection tests
+        working-directory: test/native_cpp
+        run: ./test_queue_fault_injection
+
+      - name: Compile RISK-15 OTA anti-downgrade policy tests
+        working-directory: test/native_cpp
+        run: |
+          g++ -std=c++14 -Wall -I../.. \
+            test_ota_version_policy.cpp -o test_ota_version_policy
+
+      - name: Run RISK-15 OTA anti-downgrade policy tests
+        working-directory: test/native_cpp
+        run: ./test_ota_version_policy
+
+  # ---------------------------------------------------------------------
   # Desktop app -- Windows (the app's actual shipped target) and Ubuntu
   # (the underlying Node logic is cross-platform; wifiScan.js's own
   # process.platform branch already degrades gracefully off-Windows --

@@ -72,7 +72,7 @@ public:
     // P0-4 remediation (RISK-04): real filesystem-reported capacity + the
     // durable failed-write record, both now genuinely remotely visible --
     // "server and Device Manager show the fault" (mandatory P0-4 test).
-    s += ",\"capacity_pct_used\":" + String(EventQueue::capacityPercentUsed(), 1);
+    s += ",\"capacity_pct_used\":" + String(q.capacityPercentUsed(), 1);
     s += ",\"failed_write_count\":" + String(q.failedWriteCount());
     if (q.hasFailedWrite()) {
       s += ",\"last_write_failure\":{\"error_code\":\"" + String(q.lastFailureCodeStr()) + "\"";
@@ -88,7 +88,19 @@ public:
     s += ",\"last_push_http_code\":";
     s += sync.havePush() ? String(sync.lastPushHttpCode()) : String("null");
     s += ",\"ota\":{\"state\":\"" + String(otaStateStr_(ota.state())) + "\"";
-    s += ",\"running_version\":\"" FW_VERSION "\"}";
+    s += ",\"running_version\":\"" FW_VERSION "\"";
+    // RISK-15 remediation: security-version floor + last-reject-reason, so
+    // Device Manager/an operator can see WHY a candidate was rejected
+    // (mandate requirement: "Device Manager shows previous and current
+    // versions" / distinguishing rejection reasons), not just OTA silence.
+    s += ",\"security_version\":" + String(FW_SECURITY_VERSION);
+    s += ",\"accepted_security_floor\":" + String(st.securityVersion());
+    if (ota.lastRejectReason() != OTA_ACCEPT) {
+      s += ",\"last_reject_reason\":\"" + String(otaVerdictStr(ota.lastRejectReason())) + "\"";
+    } else {
+      s += ",\"last_reject_reason\":null";
+    }
+    s += "}";
     s += ",\"health_state\":\"" + healthState + "\"";
     s += "}";
     return s;
@@ -276,31 +288,39 @@ private:
     // 100% capacity"), sourced from LittleFS.usedBytes()/totalBytes() --
     // not an estimated row count. Checked highest-first so only the single
     // most severe threshold currently crossed is ever reported.
-    float pctUsed = EventQueue::capacityPercentUsed();
-    if (pctUsed >= 100.0f) {
-      if (!first) alarms += ",";
-      alarms += "{\"type\":\"STORAGE_FULL\",\"severity\":\"CRITICAL\","
-                "\"raised_at_ms_ago\":0,"
-                "\"message\":\"Queue storage partition is full\"}";
-      first = false; haveCritical = true;
-    } else if (pctUsed >= 95.0f) {
-      if (!first) alarms += ",";
-      alarms += "{\"type\":\"STORAGE_CRITICAL\",\"severity\":\"CRITICAL\","
-                "\"raised_at_ms_ago\":0,"
-                "\"message\":\"Queue storage >=95% full\"}";
-      first = false; haveCritical = true;
-    } else if (pctUsed >= 90.0f) {
-      if (!first) alarms += ",";
-      alarms += "{\"type\":\"STORAGE_HIGH\",\"severity\":\"WARNING\","
-                "\"raised_at_ms_ago\":0,"
-                "\"message\":\"Queue storage >=90% full\"}";
-      first = false; haveWarning = true;
-    } else if (pctUsed >= 80.0f) {
-      if (!first) alarms += ",";
-      alarms += "{\"type\":\"STORAGE_WARNING\",\"severity\":\"WARNING\","
-                "\"raised_at_ms_ago\":0,"
-                "\"message\":\"Queue storage >=80% full\"}";
-      first = false; haveWarning = true;
+    // RISK-04 phase-2: the threshold SELECTION itself now lives in queue.h's
+    // capacityAlarmLevel() (a pure function, host-tested) -- this block only
+    // maps that already-decided level to the alarm JSON shape.
+    switch (capacityAlarmLevel(q.capacityPercentUsed())) {
+      case QCAP_CRITICAL_100:
+        if (!first) alarms += ",";
+        alarms += "{\"type\":\"STORAGE_FULL\",\"severity\":\"CRITICAL\","
+                  "\"raised_at_ms_ago\":0,"
+                  "\"message\":\"Queue storage partition is full\"}";
+        first = false; haveCritical = true;
+        break;
+      case QCAP_CRITICAL_95:
+        if (!first) alarms += ",";
+        alarms += "{\"type\":\"STORAGE_CRITICAL\",\"severity\":\"CRITICAL\","
+                  "\"raised_at_ms_ago\":0,"
+                  "\"message\":\"Queue storage >=95% full\"}";
+        first = false; haveCritical = true;
+        break;
+      case QCAP_WARNING_90:
+        if (!first) alarms += ",";
+        alarms += "{\"type\":\"STORAGE_HIGH\",\"severity\":\"WARNING\","
+                  "\"raised_at_ms_ago\":0,"
+                  "\"message\":\"Queue storage >=90% full\"}";
+        first = false; haveWarning = true;
+        break;
+      case QCAP_WARNING_80:
+        if (!first) alarms += ",";
+        alarms += "{\"type\":\"STORAGE_WARNING\",\"severity\":\"WARNING\","
+                  "\"raised_at_ms_ago\":0,"
+                  "\"message\":\"Queue storage >=80% full\"}";
+        first = false; haveWarning = true;
+        break;
+      default: break;
     }
 
     alarms += "]";

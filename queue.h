@@ -17,16 +17,28 @@
 // avoid rewriting a large file mid-operation.
 // ============================================================================
 #pragma once
+// RISK-04 phase-2 remediation: EventQueue's append()/FailureState paths are
+// routed through StorageBackend (storage_backend.h) so a native host test
+// can fault-inject them without an ESP32. Production (NATIVE_TEST undefined)
+// includes the real Arduino/LittleFS headers exactly as before; native tests
+// include the minimal host shim instead. See
+// Docs/audit/coviu_oil_meter_p0_remediation_phase2/02_FLASH_FAULT_INJECTION_DESIGN.md.
+#ifndef NATIVE_TEST
 #include <Arduino.h>
 #include <LittleFS.h>
 #include <unistd.h>      // ADR-003 (Phase 2): POSIX truncate() -- see append()
 #include <errno.h>
-#include "config.h"
 #include "totalizer.h"   // ADR-003 (Phase 2): EventQueue reads Totalizer's
                           // write-offset checkpoint (see cleanupOrphanSegments_
                           // and append()'s truncate-before-append logic below).
                           // One-directional: Totalizer has no knowledge of
                           // EventQueue.
+#else
+#include "arduino_shim.h"
+#include "queue_offset_checkpoint.h"
+#endif
+#include "config.h"
+#include "storage_backend.h"
 
 #define QROW_MAGIC   0x51524F57UL   // 'QROW'
 #define ACK_MAGIC    0xAC4ED000UL   // valid hex ('ACKED' had a non-hex 'K')
@@ -65,6 +77,21 @@
 // keeps counting independent of queue write failures, matching the
 // architecture's existing "hardware counts, software ships" separation.
 // ---------------------------------------------------------------------------
+// RISK-04 phase-2 remediation: the capacity-alarm threshold SELECTION logic
+// (not just the underlying percentage arithmetic) is now a pure, dependency-
+// free function so a native host test can exercise the exact same boundary
+// decisions diagnostics.h's computeHealth_() makes, rather than only testing
+// capacityPercentUsed()'s raw division. Highest threshold wins, matching
+// diagnostics.h's existing checked-highest-first convention.
+enum QueueCapacityAlarm { QCAP_NONE, QCAP_WARNING_80, QCAP_WARNING_90, QCAP_CRITICAL_95, QCAP_CRITICAL_100 };
+inline QueueCapacityAlarm capacityAlarmLevel(float pctUsed) {
+  if (pctUsed >= 100.0f) return QCAP_CRITICAL_100;
+  if (pctUsed >= 95.0f)  return QCAP_CRITICAL_95;
+  if (pctUsed >= 90.0f)  return QCAP_WARNING_90;
+  if (pctUsed >= 80.0f)  return QCAP_WARNING_80;
+  return QCAP_NONE;
+}
+
 #define FAIL_MAGIC     0xFA17ED00UL
 #define FAIL_PATH_A    "/queue/failA.bin"
 #define FAIL_PATH_B    "/queue/failB.bin"
@@ -137,13 +164,28 @@ struct __attribute__((packed)) AckRec {
 
 class EventQueue {
 public:
+#ifndef NATIVE_TEST
   // `tot` is optional (default nullptr) so the existing call site in
-  // covio_firmware.ino (`eventQueue.begin();`) keeps compiling unmodified.
-  // Wiring the real Totalizer* through is a later Phase 2 task (P2-T8);
-  // until then, orphan-segment cleanup below is correctly a no-op.
-  void begin(Totalizer* tot = nullptr) {
+  // covio_firmware.ino (`eventQueue.begin(&totalizer)`) keeps compiling
+  // completely unmodified -- this overload supplies the real production
+  // LittleFsBackend automatically, so no call site anywhere in the firmware
+  // needs to know StorageBackend exists. RISK-04 phase-2 remediation.
+  void begin(IQueueOffsetCheckpoint* tot = nullptr) {
+    static LittleFsBackend defaultBackend;
+    begin(tot, &defaultBackend);
+  }
+#endif
+
+  // RISK-04 phase-2 remediation: native host tests call this overload
+  // directly, supplying a FakeQueueOffsetCheckpoint and a
+  // FakeStorageBackend -- exercising the REAL EventQueue class, not a
+  // reimplementation.
+  void begin(IQueueOffsetCheckpoint* tot, StorageBackend* backend) {
     tot_ = tot;
+    backend_ = backend;
+#ifndef NATIVE_TEST
     if (!LittleFS.exists("/queue")) LittleFS.mkdir("/queue");
+#endif
     AckRec a, b;
     bool va = loadAck_(ACK_PATH_A, a), vb = loadAck_(ACK_PATH_B, b);
     if (va && vb) ack_ = (a.writes >= b.writes) ? a : b;
@@ -151,7 +193,16 @@ public:
     else if (vb)  ack_ = b;
     else { memset(&ack_, 0, sizeof(ack_)); ack_.magic = ACK_MAGIC; }
     Serial.printf("[Q] acked_seq=%u\n", ack_.acked_seq);
+#ifndef NATIVE_TEST
+    // RISK-04 phase-2: orphan-segment cleanup and the backlog-count boot
+    // scan are OUT OF SCOPE for this fault-injection harness (see
+    // 02_FLASH_FAULT_INJECTION_DESIGN.md) -- they remain exactly as before,
+    // direct-LittleFS, compile-verified-only. Skipped (not fault-injected,
+    // not exercised) under NATIVE_TEST so this file can compile on host at
+    // all without pulling in LittleFS/File for logic this pass does not
+    // touch.
     cleanupOrphanSegments_();
+#endif
 
     // P0-4 remediation (RISK-04): recover the failed-write history same as
     // AckRec above -- this is what makes "failed-write counter survives
@@ -175,7 +226,9 @@ public:
     // design avoids). Guarded on tot_ != nullptr, mirroring every other
     // segment-aware/legacy split in this class; the legacy path leaves the
     // counter at its default 0, matching pendingCount()'s own doc comment.
+#ifndef NATIVE_TEST
     if (tot_) unackedCount_ = computeUnackedCount_();
+#endif
   }
 
   // ADR-003 (Phase 2): truncate-before-append + active-segment write path.
@@ -199,38 +252,31 @@ public:
     // ---- determine actual on-disk size --------------------------------------
     // FILE_APPEND creates the segment file if this is its first row (same,
     // already-proven behavior the original LOG_PATH append() relied on) and
-    // never truncates existing content on open.
-    uint32_t actualSize;
-    {
-      File f = LittleFS.open(path, FILE_APPEND);
-      if (!f) {
-        Serial.println("[Q] segment open FAILED");
-        recordWriteFailure_(QFAIL_SEGMENT_OPEN);
-        return;
-      }
-      actualSize = f.size();
-      f.close();
+    // never truncates existing content on open. RISK-04 phase-2: routed
+    // through backend_->appendOpenSize(), identical semantics to the
+    // pre-refactor direct "open FILE_APPEND, read size, close" sequence.
+    long actualSizeL = backend_->appendOpenSize(path.c_str());
+    if (actualSizeL < 0) {
+      Serial.println("[Q] segment open FAILED");
+      recordWriteFailure_(QFAIL_SEGMENT_OPEN);
+      return;
     }
+    uint32_t actualSize = (uint32_t)actualSizeL;
 
     // ---- truncate-before-append ----------------------------------------------
     // Compare actual on-disk size to the last CONFIRMED good offset. If the
     // file is larger, a prior append was torn (power loss between the write
-    // and its checkpoint) -- discard the unconfirmed tail via a direct POSIX
-    // truncate BEFORE any new bytes are written. No row is ever appended on
-    // top of unconfirmed bytes (ADR-003). Uses POSIX truncate() against the
-    // VFS-mounted path, not a File-class method -- File::truncate() does not
-    // exist in this core's FS API, but the underlying ESP-IDF VFS layer's
-    // truncate() does. LittleFS mounts at the "/littlefs" VFS base path (the
-    // default arduino-esp32 LittleFS.begin() basePath) -- unlike the SD
-    // library's mount point, that prefix is NOT implicit in FS.h-relative
-    // paths like `path` here, so it must be prepended explicitly for the
-    // POSIX call (LittleFS.open()/exists()/etc. above add it internally;
-    // truncate() bypasses that wrapper entirely).
-    String vfsPath = String("/littlefs") + path;
+    // and its checkpoint) -- discard the unconfirmed tail via truncateTo()
+    // BEFORE any new bytes are written. No row is ever appended on top of
+    // unconfirmed bytes (ADR-003). RISK-04 phase-2: backend_->truncateTo()
+    // wraps the same "/littlefs"-prefixed POSIX truncate() call the
+    // pre-refactor code made directly (see LittleFsBackend::truncateTo in
+    // storage_backend.h) -- production behavior is unchanged; a native test
+    // can now deterministically fail this specific call.
     if (actualSize > goodOffset) {
-      if (truncate(vfsPath.c_str(), goodOffset) != 0) {
-        Serial.printf("[Q] truncate FAILED path=%s to=%u (errno=%d)\n",
-                      path.c_str(), (unsigned)goodOffset, errno);
+      if (!backend_->truncateTo(path.c_str(), goodOffset)) {
+        Serial.printf("[Q] truncate FAILED path=%s to=%u\n",
+                      path.c_str(), (unsigned)goodOffset);
         recordWriteFailure_(QFAIL_TRUNCATE);
         return;   // do not append on top of an unresolved torn tail
       }
@@ -253,24 +299,19 @@ public:
     // reflect. Recorded regardless of outcome below (a slow failing write
     // is exactly what this metric should surface).
     uint32_t sdWriteStart = millis();
-    File f = LittleFS.open(path, FILE_APPEND);
-    if (!f) {
+    long written = backend_->appendWrite(path.c_str(), (uint8_t*)&row, sizeof(row));
+    lastRowWriteLatencyMs_ = millis() - sdWriteStart;
+    haveRowWriteLatency_ = true;
+    if (written < 0) {
       // DM-Phase 1 validation-pass fix: a slow-then-failing open is exactly
-      // the SD trouble this metric exists to surface -- record it here too,
-      // not only after a successful open, matching this comment block's own
-      // "regardless of outcome" claim above.
-      lastRowWriteLatencyMs_ = millis() - sdWriteStart;
-      haveRowWriteLatency_ = true;
+      // the SD trouble this metric exists to surface -- recorded above
+      // regardless of outcome, matching this comment block's own existing
+      // claim.
       Serial.println("[Q] segment append open FAILED");
       recordWriteFailure_(QFAIL_WRITE_SHORT);
       return;
     }
-    size_t written = f.write((uint8_t*)&row, sizeof(row));
-    f.flush();
-    f.close();
-    lastRowWriteLatencyMs_ = millis() - sdWriteStart;
-    haveRowWriteLatency_ = true;
-    if (written != sizeof(row)) {
+    if ((size_t)written != sizeof(row)) {
       // Short/failed write -- treat exactly like a torn write: do NOT
       // advance the checkpoint. The next append()'s truncate-before-append
       // check cleans up whatever partial bytes landed.
@@ -290,6 +331,17 @@ public:
     tot_->setQueueOffset(activeSeg, goodOffset + sizeof(QRow));
     unackedCount_++;   // DM-Phase 1: this row is now durably pending
   }
+
+#ifndef NATIVE_TEST
+  // RISK-04 phase-2: everything from here to the matching #endif below (the
+  // legacy single-file fallback path, segment-aware pending()/ackThrough(),
+  // orphan-segment cleanup, and the backlog boot-scan) is OUT OF SCOPE for
+  // this fault-injection harness -- unchanged from before this phase,
+  // direct-LittleFS, compile-verified only. See
+  // 02_FLASH_FAULT_INJECTION_DESIGN.md for the scope rationale. Excluded
+  // from NATIVE_TEST builds entirely (rather than left in and simply
+  // unused) so this header does not require LittleFS/File to exist on host
+  // for logic this pass does not touch or claim to test.
 
   // Pre-Phase-2 behavior, preserved verbatim as the fallback path while
   // tot_ is not yet wired. Identical to the original append().
@@ -509,6 +561,7 @@ public:
     QRow tmp[1];
     return pending(tmp, 1) == 0;
   }
+#endif  // NATIVE_TEST -- see the matching #ifndef above appendLegacy_()
 
   // DM-Phase 1 (local diagnostics, §13 A.3 /api/v1/status "queue" object) --
   // maintained counter, NOT a rescan -- see append()/ackThrough() above for
@@ -545,10 +598,14 @@ public:
   // metadata), so this is accurate regardless of any per-row overhead
   // assumption. See 06_FLASH_LIFETIME_ANALYSIS.md for why an estimated
   // capacity constant was rejected in favor of this.
-  static float capacityPercentUsed() {
-    size_t total = LittleFS.totalBytes();
+  // RISK-04 phase-2: no longer static -- reads via backend_ (real
+  // LittleFsBackend in production, FakeStorageBackend in native tests) so
+  // capacity-threshold behavior (80/90/95/100%) is genuinely testable, not
+  // just compile-verified.
+  float capacityPercentUsed() {
+    size_t total = backend_->totalBytes();
     if (total == 0) return 0.0f;
-    return (100.0f * (float)LittleFS.usedBytes()) / (float)total;
+    return (100.0f * (float)backend_->usedBytes()) / (float)total;
   }
 
 private:
@@ -573,10 +630,13 @@ private:
     persistFail_();
   }
 
+  // RISK-04 phase-2: routed through StorageBackend::readWhole/writeWhole,
+  // the same fixed-size-whole-record primitive used for AckRec below --
+  // identical on-disk behavior to the pre-refactor direct LittleFS calls
+  // (same FILE_READ/FILE_WRITE semantics), now fault-injectable on host.
   bool loadFail_(const char* path, FailureState& out) {
-    File f = LittleFS.open(path, FILE_READ);
-    if (!f || f.size() != sizeof(FailureState)) { if (f) f.close(); return false; }
-    f.read((uint8_t*)&out, sizeof(out)); f.close();
+    long got = backend_->readWhole(path, (uint8_t*)&out, sizeof(out));
+    if (got != (long)sizeof(FailureState)) return false;
     if (out.magic != FAIL_MAGIC) return false;
     uint32_t want = out.crc32; out.crc32 = 0;
     bool ok = (crc32_((uint8_t*)&out, sizeof(out)) == want);
@@ -596,10 +656,9 @@ private:
     // this); there is no more-durable fallback to escalate to on this
     // hardware, and retrying indefinitely here would risk the failure path
     // itself blocking the main loop.
-    File f = LittleFS.open(path, FILE_WRITE);
-    if (!f) { Serial.println("[Q] failure-state checkpoint open FAILED"); return; }
-    f.write((uint8_t*)&fail_, sizeof(fail_));
-    f.flush(); f.close();
+    if (!backend_->writeWhole(path, (uint8_t*)&fail_, sizeof(fail_))) {
+      Serial.println("[Q] failure-state checkpoint open FAILED");
+    }
   }
 
 
@@ -613,10 +672,13 @@ private:
     return ~crc;
   }
 
+  // RISK-04 phase-2: routed through StorageBackend, same rationale as
+  // loadFail_/persistFail_ above -- AckRec recovery happens in the SAME
+  // begin() call as FailureState recovery, so both must work identically
+  // whether backend_ is a real LittleFsBackend or a native-test fake.
   bool loadAck_(const char* path, AckRec& out) {
-    File f = LittleFS.open(path, FILE_READ);
-    if (!f || f.size() != sizeof(AckRec)) { if (f) f.close(); return false; }
-    f.read((uint8_t*)&out, sizeof(out)); f.close();
+    long got = backend_->readWhole(path, (uint8_t*)&out, sizeof(out));
+    if (got != (long)sizeof(AckRec)) return false;
     if (out.magic != ACK_MAGIC) return false;
     uint32_t want = out.crc32; out.crc32 = 0;
     bool ok = (crc32_((uint8_t*)&out, sizeof(out)) == want);
@@ -629,12 +691,12 @@ private:
     const char* path = (ack_.writes & 1) ? ACK_PATH_A : ACK_PATH_B;
     ack_.crc32 = 0;
     ack_.crc32 = crc32_((uint8_t*)&ack_, sizeof(ack_));
-    File f = LittleFS.open(path, FILE_WRITE);
-    if (!f) return;
-    f.write((uint8_t*)&ack_, sizeof(ack_));
-    f.flush(); f.close();
+    backend_->writeWhole(path, (uint8_t*)&ack_, sizeof(ack_));
   }
 
+#ifndef NATIVE_TEST
+  // RISK-04 phase-2: out of scope for this harness, same rationale as the
+  // public-section guard above.
   // Physically shrink the log only when everything is acked — safe point.
   void maybeCompact_() {
     if (!empty()) return;
@@ -680,10 +742,18 @@ private:
     }
     return count;
   }
+#endif  // NATIVE_TEST -- see the matching #ifndef above maybeCompact_()
 
   AckRec ack_{};
   FailureState fail_{};   // P0-4 remediation (RISK-04)
-  Totalizer* tot_ = nullptr;   // ADR-003 (Phase 2): may be null until P2-T8
+  IQueueOffsetCheckpoint* tot_ = nullptr;   // ADR-003 (Phase 2): may be null until P2-T8.
+                                            // RISK-04 phase-2: narrowed from Totalizer* to
+                                            // this dependency-free interface (see
+                                            // queue_offset_checkpoint.h) so a native host
+                                            // test can supply a fake without a real Totalizer.
+  StorageBackend* backend_ = nullptr;      // RISK-04 phase-2: real LittleFsBackend in
+                                            // production (see the NATIVE_TEST-guarded begin()
+                                            // overload above), FakeStorageBackend in tests.
   uint32_t unackedCount_ = 0;  // DM-Phase 1: maintained backlog counter
 
   // DM-Phase 1: metrics instrumentation state (§13 A.3 /api/v1/metrics)
@@ -705,6 +775,15 @@ private:
   // false (leaves idOut untouched) for any non-matching filename, e.g.
   // "ackA.bin" — so cleanupOrphanSegments_() safely ignores non-segment
   // files in the same directory.
+  //
+  // RISK-04 phase-2: guarded out under NATIVE_TEST along with
+  // cleanupOrphanSegments_() below (its only caller) -- it uses
+  // String::indexOf()/length()/operator[], which the minimal native-test
+  // arduino_shim.h deliberately does NOT implement (out of scope for this
+  // harness; see 02_FLASH_FAULT_INJECTION_DESIGN.md). segmentPath_() above
+  // stays unguarded because append() (in scope) needs it, and it only uses
+  // the small String subset the shim DOES implement.
+#ifndef NATIVE_TEST
   static bool parseSegmentId_(const String& name, uint32_t& idOut) {
     int i = name.indexOf("seg_");
     if (i < 0) return false;
@@ -762,4 +841,5 @@ private:
       LittleFS.remove(segmentPath_(orphanIds[i]));
     }
   }
+#endif  // NATIVE_TEST -- see the matching #ifndef above cleanupOrphanSegments_()
 };
