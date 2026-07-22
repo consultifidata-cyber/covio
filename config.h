@@ -89,13 +89,36 @@
 
 // ---- Queue / storage --------------------------------------------------------
 // SD_QUEUE_DIR still names the directory, but it now lives on internal flash
-// (LittleFS "spiffs" partition, ~3.4MB on this unit's default_16MB.csv table
-// -- see platformio.ini) instead of an SD card. Sized down from the SD-era
-// defaults (100000/10000, which assumed near-unlimited SD capacity) to fit
-// comfortably: a QRow is 36 bytes, so QUEUE_HIGHWATER=20000 rows is ~720KB
-// (well under the ~3.4MB partition, leaving headroom for two ping-pong
-// segments plus LittleFS's own metadata overhead) -- roughly 5.5 hours of
-// offline buffering at the 1 row/sec telemetry cadence below.
+// (LittleFS "spiffs" partition) instead of an SD card.
+//
+// P0-4 remediation (RISK-04): the partition size below is no longer a code-
+// comment guess -- confirmed by directly reading the ACTUAL partition table
+// this build uses (platformio.ini's board_build.partitions=default_16MB.csv,
+// located and read from the installed PlatformIO espressif32 toolchain):
+//   spiffs, data, spiffs, 0xc90000, 0x360000   <- offset, SIZE in bytes
+// 0x360000 = 3,538,944 bytes exactly (3.375 MiB), not an approximation.
+// QRow is 36 bytes (sizeof, verified against the packed struct above), so:
+//   3,538,944 bytes / 36 bytes/row = 98,304 rows of RAW capacity if the
+//   partition held nothing else at all and LittleFS had zero overhead.
+// Real usable capacity is lower once LittleFS's own metadata/wear-leveling
+// reserve and this queue's own non-row files (ackA/ackB.bin, failA/failB.bin,
+// per-segment file overhead) are accounted for -- EventQueue::
+// capacityPercentUsed() (queue.h) reports the REAL figure at runtime via
+// LittleFS.usedBytes()/totalBytes(), which is authoritative; the raw-
+// capacity number above is a theoretical ceiling for sizing QUEUE_HIGHWATER
+// below, not a promise of exactly how many rows will fit in practice (see
+// 06_FLASH_LIFETIME_ANALYSIS.md for the full worked estimate and its
+// stated assumptions).
+//
+// QUEUE_HIGHWATER=20000 rows is ~720KB (36 bytes x 20000) -- roughly 20% of
+// the raw 98,304-row ceiling above, chosen as a soft advisory threshold
+// (quality_code flag on subsequent records, and now also a diagnostics.h
+// STORAGE_WARNING-tier signal) well before real capacity is approached --
+// roughly 5.5 hours of offline buffering at the 1 row/sec telemetry cadence
+// below. This is a SOFT threshold only -- it does not stop the queue from
+// continuing to accept rows past this point (see queue.h's append(), which
+// only refuses a write on an actual filesystem failure, tracked durably by
+// P0-4's FailureState, never on merely crossing this number).
 #define SD_QUEUE_DIR          "/queue"    // append-only event log lives here
 #define PUSH_BATCH_MAX        50          // max records per push request
 #define QUEUE_HIGHWATER       20000UL     // flag quality_code if backlog exceeds

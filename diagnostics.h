@@ -68,7 +68,20 @@ public:
     s += "\"";
     s += ",\"queue\":{\"backlog\":" + String(q.pendingCount());
     s += ",\"acked_seq\":" + String(q.ackedSeq());
-    s += ",\"last_seq\":" + String(tot.lastSeq()) + "}";
+    s += ",\"last_seq\":" + String(tot.lastSeq());
+    // P0-4 remediation (RISK-04): real filesystem-reported capacity + the
+    // durable failed-write record, both now genuinely remotely visible --
+    // "server and Device Manager show the fault" (mandatory P0-4 test).
+    s += ",\"capacity_pct_used\":" + String(EventQueue::capacityPercentUsed(), 1);
+    s += ",\"failed_write_count\":" + String(q.failedWriteCount());
+    if (q.hasFailedWrite()) {
+      s += ",\"last_write_failure\":{\"error_code\":\"" + String(q.lastFailureCodeStr()) + "\"";
+      s += ",\"first_failure_uptime_s\":" + String(q.firstFailureUptimeS());
+      s += ",\"last_failure_uptime_s\":" + String(q.lastFailureUptimeS()) + "}";
+    } else {
+      s += ",\"last_write_failure\":null";
+    }
+    s += "}";
     s += ",\"totalizer_raw_pulses\":" + String((unsigned long long)tot.total());
     s += ",\"last_sync_ms_ago\":";
     s += sync.haveSync() ? String(millis() - sync.lastSyncMs()) : String("null");
@@ -239,6 +252,55 @@ private:
                 "\"raised_at_ms_ago\":0,"
                 "\"message\":\"Internal flash storage (LittleFS) not mounted\"}";
       first = false; haveCritical = true;
+    }
+
+    // P0-4 remediation (RISK-04): a durable, previously-silent measurement
+    // loss is now a loud CRITICAL alarm -- this is the mandate's own
+    // required invariant ("the device must enter a clearly observable
+    // degraded/fault state rather than silently continue as if data were
+    // safe"), not merely a log line nobody may ever read. Stays raised for
+    // the rest of the device's life (EventQueue::hasFailedWrite() is
+    // monotonic, see queue.h) -- a historical loss must remain visible,
+    // not silently age out.
+    if (q.hasFailedWrite()) {
+      if (!first) alarms += ",";
+      alarms += "{\"type\":\"QUEUE_WRITE_FAILURE\",\"severity\":\"CRITICAL\","
+                "\"raised_at_ms_ago\":0,"
+                "\"message\":\"" + String(q.failedWriteCount()) + " measurement(s) failed to persist "
+                "durably (last: " + String(q.lastFailureCodeStr()) + ")\"}";
+      first = false; haveCritical = true;
+    }
+
+    // P0-4 remediation (RISK-04): real filesystem-reported capacity
+    // thresholds (mandate requirement: "define behavior at 80%/90%/95%/
+    // 100% capacity"), sourced from LittleFS.usedBytes()/totalBytes() --
+    // not an estimated row count. Checked highest-first so only the single
+    // most severe threshold currently crossed is ever reported.
+    float pctUsed = EventQueue::capacityPercentUsed();
+    if (pctUsed >= 100.0f) {
+      if (!first) alarms += ",";
+      alarms += "{\"type\":\"STORAGE_FULL\",\"severity\":\"CRITICAL\","
+                "\"raised_at_ms_ago\":0,"
+                "\"message\":\"Queue storage partition is full\"}";
+      first = false; haveCritical = true;
+    } else if (pctUsed >= 95.0f) {
+      if (!first) alarms += ",";
+      alarms += "{\"type\":\"STORAGE_CRITICAL\",\"severity\":\"CRITICAL\","
+                "\"raised_at_ms_ago\":0,"
+                "\"message\":\"Queue storage >=95% full\"}";
+      first = false; haveCritical = true;
+    } else if (pctUsed >= 90.0f) {
+      if (!first) alarms += ",";
+      alarms += "{\"type\":\"STORAGE_HIGH\",\"severity\":\"WARNING\","
+                "\"raised_at_ms_ago\":0,"
+                "\"message\":\"Queue storage >=90% full\"}";
+      first = false; haveWarning = true;
+    } else if (pctUsed >= 80.0f) {
+      if (!first) alarms += ",";
+      alarms += "{\"type\":\"STORAGE_WARNING\",\"severity\":\"WARNING\","
+                "\"raised_at_ms_ago\":0,"
+                "\"message\":\"Queue storage >=80% full\"}";
+      first = false; haveWarning = true;
     }
 
     alarms += "]";

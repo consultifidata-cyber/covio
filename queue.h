@@ -35,6 +35,58 @@
 #define ACK_PATH_B   "/queue/ackB.bin"
 
 // ---------------------------------------------------------------------------
+// P0-4 remediation (RISK-04: silent measurement loss at flash-full/write
+// failure): every append() failure branch below (segment-open failure,
+// truncate failure, short/failed write) previously only logged to Serial and
+// returned -- if nobody was watching the serial console at that exact
+// instant, that one second's telemetry sample was gone with zero durable
+// trace, while the totalizer (a SEPARATE, independent counter) kept
+// climbing regardless. An operator reading /api/v1/status afterward had no
+// way to tell "the meter was fine but nothing was recorded" from "nothing
+// happened, all good."
+//
+// FAIL_MAGIC uses the exact same dual-slot ping-pong + CRC32 pattern already
+// proven correct elsewhere in this file (AckRec) and in totalizer.h
+// (Checkpoint) -- reused here specifically because it is already
+// battle-tested in this codebase, not reinvented. Written ONLY on an actual
+// failure (never on the hot per-second append path), so this adds no new
+// wear-leveling burden (see 06_FLASH_LIFETIME_ANALYSIS.md).
+//
+// DESIGN DECISION (documented, not silently assumed): the failure counter is
+// monotonic and NEVER auto-cleared by recovery -- a device that once lost
+// data and later started writing successfully again must still show that
+// history (mandate requirement: "a measurement must never be treated as
+// safely captured unless its durable record has been successfully
+// written... the device must enter a clearly observable degraded/fault
+// state"). This is "Option A, fail loud" from the mandate's own two listed
+// policies: no RAM-only fallback buffer is introduced (that would just move
+// the same power-loss risk RISK-04 is about into an even less durable
+// place), and the existing pulse-counter/totalizer evidence is untouched and
+// keeps counting independent of queue write failures, matching the
+// architecture's existing "hardware counts, software ships" separation.
+// ---------------------------------------------------------------------------
+#define FAIL_MAGIC     0xFA17ED00UL
+#define FAIL_PATH_A    "/queue/failA.bin"
+#define FAIL_PATH_B    "/queue/failB.bin"
+
+enum QueueFailCode {
+  QFAIL_NONE = 0,
+  QFAIL_SEGMENT_OPEN,       // LittleFS.open(path, FILE_APPEND) returned false
+  QFAIL_TRUNCATE,           // truncate-before-append (torn-tail cleanup) failed
+  QFAIL_WRITE_SHORT,        // f.write() wrote fewer bytes than sizeof(QRow), or open-for-write failed
+};
+
+struct __attribute__((packed)) FailureState {
+  uint32_t magic;
+  uint32_t failed_write_count;   // lifetime cumulative, NEVER decremented
+  uint32_t first_failure_uptime_s;  // 0 == never failed (device uptime, not wall clock -- no RTC exists)
+  uint32_t last_failure_uptime_s;
+  uint32_t last_error_code;       // QueueFailCode
+  uint32_t writes;                // monotonic -> newest slot wins (ping-pong selector)
+  uint32_t crc32;
+};
+
+// ---------------------------------------------------------------------------
 // ADR-001 (Self-Describing, Versioned Telemetry Schema): every record, on both
 // the SD row and the wire JSON, is prefixed with a schema_version and a
 // record_type. A device only ever writes/emits the single schema_version its
@@ -101,6 +153,22 @@ public:
     Serial.printf("[Q] acked_seq=%u\n", ack_.acked_seq);
     cleanupOrphanSegments_();
 
+    // P0-4 remediation (RISK-04): recover the failed-write history same as
+    // AckRec above -- this is what makes "failed-write counter survives
+    // reboot" (a mandatory P0-4 test) true; a device that lost data before a
+    // reboot must still report that history afterward, not start clean.
+    FailureState fa, fb;
+    bool fva = loadFail_(FAIL_PATH_A, fa), fvb = loadFail_(FAIL_PATH_B, fb);
+    if (fva && fvb) fail_ = (fa.writes >= fb.writes) ? fa : fb;
+    else if (fva)   fail_ = fa;
+    else if (fvb)   fail_ = fb;
+    else { memset(&fail_, 0, sizeof(fail_)); fail_.magic = FAIL_MAGIC; }
+    if (fail_.failed_write_count > 0) {
+      Serial.printf("[Q] WARNING: %u historical write failure(s), last=%s at uptime=%us\n",
+                    (unsigned)fail_.failed_write_count, failCodeStr_((QueueFailCode)fail_.last_error_code),
+                    (unsigned)fail_.last_failure_uptime_s);
+    }
+
     // DM-Phase 1: seed the maintained backlog counter with one full scan at
     // boot -- this is the ONLY unbounded scan this feature introduces, and
     // it runs once, not per push cycle (that's exactly the F-05 cost this
@@ -135,7 +203,11 @@ public:
     uint32_t actualSize;
     {
       File f = LittleFS.open(path, FILE_APPEND);
-      if (!f) { Serial.println("[Q] segment open FAILED"); return; }
+      if (!f) {
+        Serial.println("[Q] segment open FAILED");
+        recordWriteFailure_(QFAIL_SEGMENT_OPEN);
+        return;
+      }
       actualSize = f.size();
       f.close();
     }
@@ -159,6 +231,7 @@ public:
       if (truncate(vfsPath.c_str(), goodOffset) != 0) {
         Serial.printf("[Q] truncate FAILED path=%s to=%u (errno=%d)\n",
                       path.c_str(), (unsigned)goodOffset, errno);
+        recordWriteFailure_(QFAIL_TRUNCATE);
         return;   // do not append on top of an unresolved torn tail
       }
     } else if (actualSize < goodOffset) {
@@ -189,6 +262,7 @@ public:
       lastRowWriteLatencyMs_ = millis() - sdWriteStart;
       haveRowWriteLatency_ = true;
       Serial.println("[Q] segment append open FAILED");
+      recordWriteFailure_(QFAIL_WRITE_SHORT);
       return;
     }
     size_t written = f.write((uint8_t*)&row, sizeof(row));
@@ -202,6 +276,13 @@ public:
       // check cleans up whatever partial bytes landed.
       Serial.printf("[Q] segment write SHORT (%u/%u bytes) -- checkpoint not advanced\n",
                     (unsigned)written, (unsigned)sizeof(row));
+      // P0-4 remediation (RISK-04): this IS the silent-loss moment this
+      // fix exists for -- a short/failed write here means this specific
+      // telemetry sample (the totalizer value + timestamp this loop
+      // iteration captured) is gone; the totalizer itself is untouched and
+      // keeps counting (by design, see totalizer.h), so this failure record
+      // is the ONLY durable trace that a sample was lost at this point.
+      recordWriteFailure_(QFAIL_WRITE_SHORT);
       return;
     }
 
@@ -445,7 +526,83 @@ public:
   bool     havePendingLatency()   { return havePendingLatency_; }
   uint32_t lastPendingLatencyMs() { return lastPendingLatencyMs_; }
 
+  // P0-4 remediation (RISK-04): remotely-visible failure state -- consumed
+  // by diagnostics.h's alarm builder so a lost measurement is loud (an
+  // operator-visible CRITICAL alarm), never silent. hasFailedWrite() is
+  // true from the moment ANY failure has ever occurred (this boot or a
+  // prior one, recovered via begin() above) and stays true forever --
+  // deliberately monotonic, never auto-cleared by later successful writes
+  // (see this file's FAIL_MAGIC header comment for why).
+  bool     hasFailedWrite()        { return fail_.failed_write_count > 0; }
+  uint32_t failedWriteCount()      { return fail_.failed_write_count; }
+  uint32_t firstFailureUptimeS()   { return fail_.first_failure_uptime_s; }
+  uint32_t lastFailureUptimeS()    { return fail_.last_failure_uptime_s; }
+  const char* lastFailureCodeStr() { return failCodeStr_((QueueFailCode)fail_.last_error_code); }
+
+  // Real filesystem-reported usage, NOT an estimated row-count percentage --
+  // LittleFS.usedBytes()/totalBytes() reflect actual on-flash occupancy
+  // (queue segments + ack/checkpoint/failure-state files + LittleFS's own
+  // metadata), so this is accurate regardless of any per-row overhead
+  // assumption. See 06_FLASH_LIFETIME_ANALYSIS.md for why an estimated
+  // capacity constant was rejected in favor of this.
+  static float capacityPercentUsed() {
+    size_t total = LittleFS.totalBytes();
+    if (total == 0) return 0.0f;
+    return (100.0f * (float)LittleFS.usedBytes()) / (float)total;
+  }
+
 private:
+  static const char* failCodeStr_(QueueFailCode c) {
+    switch (c) {
+      case QFAIL_SEGMENT_OPEN: return "segment_open_failed";
+      case QFAIL_TRUNCATE:     return "truncate_failed";
+      case QFAIL_WRITE_SHORT:  return "write_failed_or_short";
+      default:                 return "none";
+    }
+  }
+
+  // Persists ONLY when called (i.e. only on an actual failure) -- never on
+  // the hot per-second append path, so this adds no routine wear (see
+  // FAIL_MAGIC's header comment and 06_FLASH_LIFETIME_ANALYSIS.md).
+  void recordWriteFailure_(QueueFailCode code) {
+    uint32_t nowS = millis() / 1000;
+    if (fail_.failed_write_count == 0) fail_.first_failure_uptime_s = nowS;
+    fail_.failed_write_count++;
+    fail_.last_failure_uptime_s = nowS;
+    fail_.last_error_code = code;
+    persistFail_();
+  }
+
+  bool loadFail_(const char* path, FailureState& out) {
+    File f = LittleFS.open(path, FILE_READ);
+    if (!f || f.size() != sizeof(FailureState)) { if (f) f.close(); return false; }
+    f.read((uint8_t*)&out, sizeof(out)); f.close();
+    if (out.magic != FAIL_MAGIC) return false;
+    uint32_t want = out.crc32; out.crc32 = 0;
+    bool ok = (crc32_((uint8_t*)&out, sizeof(out)) == want);
+    out.crc32 = want; return ok;
+  }
+
+  void persistFail_() {
+    fail_.magic = FAIL_MAGIC;
+    fail_.writes++;
+    const char* path = (fail_.writes & 1) ? FAIL_PATH_A : FAIL_PATH_B;
+    fail_.crc32 = 0;
+    fail_.crc32 = crc32_((uint8_t*)&fail_, sizeof(fail_));
+    // Deliberately NOT gated on this same write path succeeding -- if the
+    // filesystem is unable to even persist a 28-byte failure record, that
+    // is itself surfaced via this call's own Serial log (unchanged
+    // existing behavior: callers already log to Serial before calling
+    // this); there is no more-durable fallback to escalate to on this
+    // hardware, and retrying indefinitely here would risk the failure path
+    // itself blocking the main loop.
+    File f = LittleFS.open(path, FILE_WRITE);
+    if (!f) { Serial.println("[Q] failure-state checkpoint open FAILED"); return; }
+    f.write((uint8_t*)&fail_, sizeof(fail_));
+    f.flush(); f.close();
+  }
+
+
   static uint32_t crc32_(const uint8_t* d, size_t n) {
     uint32_t crc = 0xFFFFFFFF;
     for (size_t i = 0; i < n; i++) {
@@ -525,6 +682,7 @@ private:
   }
 
   AckRec ack_{};
+  FailureState fail_{};   // P0-4 remediation (RISK-04)
   Totalizer* tot_ = nullptr;   // ADR-003 (Phase 2): may be null until P2-T8
   uint32_t unackedCount_ = 0;  // DM-Phase 1: maintained backlog counter
 
