@@ -51,11 +51,173 @@ Run:
     python server.py
     # device DEFAULT_SERVER_URL should point at http://<this-host>:8000
 """
-import hashlib, secrets, sqlite3, json, time, os
+import functools, hashlib, secrets, sqlite3, json, time, os
+from collections import defaultdict, deque
 from flask import Flask, request, jsonify, Response, send_from_directory
 
 DB = os.path.join(os.path.dirname(__file__), "covio.db")
 app = Flask(__name__)
+
+# ============================================================================
+# P0-3 remediation (RISK-03): admin/operator authentication + authorization.
+# ----------------------------------------------------------------------------
+# Every /admin/* route (K-factor edit, device provisioning, key revoke/
+# rotate, event log, device registry dashboard) previously had ZERO
+# authentication -- anyone reaching this process's port could revoke a
+# device, mint a fresh API key, or change the billing-relevant K-factor.
+# This was ADR-016's own documented "already-accepted, bench/pilot-scope
+# limitation" -- fixed here as a P0 blocker for any plant deployment.
+#
+# Design (smallest correct fix for a single-process Flask bench/pilot
+# server, not a redesign into a full IAM system):
+#   - HTTP Basic Auth, uniformly, for every /admin/* route AND for the root
+#     "/" K-factor dashboard (a browser sends Basic-Auth headers on every
+#     request, including a plain HTML <form> POST, with zero client-side
+#     code -- no cookie/session machinery needed for this scale).
+#   - Two roles: "admin" (full read+write) and "viewer" (read-only:
+#     dashboards + event log). Mutating routes require "admin"; read-only
+#     routes accept either role.
+#   - Credentials come from environment variables, never a hardcoded
+#     default (RISK-02's own lesson applied here): COVIO_ADMIN_PASSWORD /
+#     COVIO_ADMIN_VIEWER_PASSWORD. In "dev" mode (COVIO_ADMIN_MODE unset or
+#     "dev", matching this project's existing bench-stub posture) a missing
+#     password is fine -- a random one is generated once at process start
+#     and printed to the console, never persisted, never a shared constant.
+#     In "production" mode (COVIO_ADMIN_MODE=production), a missing admin
+#     password is a fail-closed startup error: the process refuses to
+#     start rather than silently running unauthenticated or with a guessable
+#     default (mandate requirement: "the server must fail closed if
+#     production security configuration is missing").
+#   - Every authentication failure is rate-limited per source IP (simple
+#     in-memory sliding window -- adequate for this single-process bench/
+#     pilot server; a real multi-instance production deployment would need
+#     a shared store, called out explicitly in the remediation report as a
+#     P2 scale item, not silently pretended away here) and recorded in the
+#     existing device_events audit trail via record_event(), the exact same
+#     mechanism already used for API_AUTH_FAILED on the device-facing side.
+#   - NOT implemented here (explicitly out of scope for this P0, already
+#     tracked as RISK-09/P1 in the prior risk register): replay protection
+#     (nonce/timestamp) on admin requests, and TLS termination itself (this
+#     bench server is plain HTTP by design -- see sync.h's ADR-005 comment;
+#     a production deployment must sit behind a TLS-terminating reverse
+#     proxy, documented in 04_ADMIN_API_SECURITY_REMEDIATION.md).
+# ============================================================================
+ADMIN_ROLES = ("admin", "viewer")
+
+
+def _resolve_admin_credentials(env=None):
+    """Pure function (env defaults to os.environ) so a test can exercise the
+    fail-closed production behavior WITHOUT importing a second copy of this
+    module or mutating the live app's already-resolved globals. Returns a
+    dict {mode, admin_password, viewer_password}. Raises RuntimeError -- the
+    fail-closed case -- if mode == 'production' and no real admin password
+    is configured."""
+    env = env if env is not None else os.environ
+    mode = env.get("COVIO_ADMIN_MODE", "dev")
+    admin_pw = env.get("COVIO_ADMIN_PASSWORD")
+    viewer_pw = env.get("COVIO_ADMIN_VIEWER_PASSWORD")
+
+    # A short, explicit denylist of common placeholder/default values -- a
+    # production operator who sets COVIO_ADMIN_PASSWORD=admin has not
+    # actually configured a real credential, and RISK-02 already showed what
+    # trusting an operator not to do that costs.
+    _OBVIOUS_DEFAULTS = {None, "", "admin", "password", "changeme", "dev-key-change-me"}
+
+    if mode == "production":
+        if admin_pw in _OBVIOUS_DEFAULTS:
+            raise RuntimeError(
+                "FAIL CLOSED: COVIO_ADMIN_MODE=production but COVIO_ADMIN_PASSWORD "
+                "is unset or an obvious placeholder. Refusing to start with "
+                "unauthenticated or trivially-guessable admin access. Set a real "
+                "COVIO_ADMIN_PASSWORD before starting this server in production."
+            )
+        return {"mode": mode, "admin_password": admin_pw, "viewer_password": viewer_pw}
+
+    # dev mode: generate a random per-process password if the operator did
+    # not pin one -- printed once, never persisted, never a shared constant
+    # (this is the RISK-02 lesson: no hardcoded default admin credential,
+    # even for a bench tool).
+    generated = False
+    if admin_pw is None:
+        admin_pw = secrets.token_urlsafe(18)
+        generated = True
+    return {"mode": mode, "admin_password": admin_pw, "viewer_password": viewer_pw,
+            "_generated": generated}
+
+
+_admin_creds = _resolve_admin_credentials()
+ADMIN_MODE = _admin_creds["mode"]
+ADMIN_PASSWORD = _admin_creds["admin_password"]
+VIEWER_PASSWORD = _admin_creds["viewer_password"]
+if _admin_creds.get("_generated"):
+    print("[ADMIN] no COVIO_ADMIN_PASSWORD set -- generated a random dev "
+          "admin password for this process only (username 'admin'):")
+    print("[ADMIN]   %s" % ADMIN_PASSWORD)
+    print("[ADMIN] set COVIO_ADMIN_PASSWORD to pin a stable value across restarts.")
+
+# Simple in-memory sliding-window rate limiter for admin auth failures, keyed
+# by remote address. Adequate for a single-process bench/pilot server; NOT a
+# distributed rate limiter (see module docstring above) -- a real multi-
+# instance deployment needs a shared store (P2, tracked in the risk register,
+# not silently pretended away here).
+ADMIN_RATE_LIMIT_MAX_FAILURES = 5
+ADMIN_RATE_LIMIT_WINDOW_S = 60
+_admin_auth_failures = defaultdict(lambda: deque(maxlen=ADMIN_RATE_LIMIT_MAX_FAILURES))
+
+
+def _admin_rate_limited(remote_addr):
+    now = time.time()
+    q = _admin_auth_failures[remote_addr]
+    while q and now - q[0] > ADMIN_RATE_LIMIT_WINDOW_S:
+        q.popleft()
+    return len(q) >= ADMIN_RATE_LIMIT_MAX_FAILURES
+
+
+def _record_admin_auth_failure(remote_addr):
+    _admin_auth_failures[remote_addr].append(time.time())
+
+
+def require_admin(role="admin"):
+    """Decorator factory gating a Flask view behind HTTP Basic Auth.
+    role='admin' (default) requires the admin credential specifically;
+    role='viewer' accepts EITHER the viewer or the admin credential (an
+    admin can always do anything a viewer can). Every failure is rate-
+    limited per source IP and recorded in the device_events audit trail,
+    matching this file's existing API_AUTH_FAILED convention for the
+    device-facing side (require_api_key() above)."""
+    assert role in ADMIN_ROLES
+
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapped(*args, **kwargs):
+            remote_addr = request.remote_addr or "unknown"
+            if _admin_rate_limited(remote_addr):
+                return jsonify(error={"code": "RATE_LIMITED",
+                                       "message": "Too many failed admin auth attempts; try again shortly."}), 429
+
+            auth = request.authorization
+            ok = False
+            if auth is not None:
+                if auth.username == "admin" and ADMIN_PASSWORD is not None:
+                    ok = secrets.compare_digest(auth.password or "", ADMIN_PASSWORD)
+                elif role == "viewer" and auth.username == "viewer" and VIEWER_PASSWORD is not None:
+                    ok = secrets.compare_digest(auth.password or "", VIEWER_PASSWORD)
+
+            if not ok:
+                _record_admin_auth_failure(remote_addr)
+                c = db()
+                record_event(c, None, "ADMIN_AUTH_FAILED", "WARNING",
+                             "Rejected admin request: missing/invalid credentials.",
+                             {"path": request.path, "remote_addr": remote_addr})
+                c.commit(); c.close()
+                return Response(
+                    jsonify(error={"code": "ADMIN_AUTH_REQUIRED",
+                                   "message": "Valid admin credentials required."}).get_data(),
+                    status=401, mimetype="application/json",
+                    headers={"WWW-Authenticate": 'Basic realm="Covio Admin"'})
+            return fn(*args, **kwargs)
+        return wrapped
+    return decorator
 
 # ---- ADR-001: schema/record-type acceptance rule (frozen, do not soften) ----
 # Per ACR-001: "previous" is only a real, accepted version once a second
@@ -528,6 +690,15 @@ def push():
                            # last_push_totalizer -- a quarantined record's
                            # totalizer is unvalidated data and must never
                            # reach the Twin.
+    # P0-1 remediation (RISK-01): every seq permanently quarantined THIS call
+    # is collected here so the response can (a) tell the caller/operator
+    # exactly what happened to it (mandate requirement: "the server must
+    # explicitly communicate the disposition of every submitted sequence")
+    # and (b) get recorded in the durable device_events audit trail below --
+    # not just the quarantined_records table, so it is visible from the same
+    # Fleet Event Log an operator already checks for everything else.
+    newly_quarantined = []
+
     for r in body["records"]:
         # ADR-001 acceptance rule: current + registered-previous version only
         # (see ACR-001 — there is no registered previous version until a
@@ -552,6 +723,8 @@ def push():
                 VALUES (?,?,?,?,?,?,?,?)""",
                 (dev, r.get("boot_id"), r.get("seq"), sv, rt,
                  reason, json.dumps(r), now_ms))
+            if r.get("seq") is not None:
+                newly_quarantined.append({"seq": r.get("seq"), "reason": reason})
             continue
 
         # Required fields for an accepted TELEMETRY record. A record that
@@ -566,6 +739,8 @@ def push():
                 VALUES (?,?,?,?,?,?,?,?)""",
                 (dev, r.get("boot_id"), r.get("seq"), sv, rt,
                  "missing_field:%s" % e, json.dumps(r), now_ms))
+            if r.get("seq") is not None:
+                newly_quarantined.append({"seq": r.get("seq"), "reason": "missing_field:%s" % e})
             continue
 
         # INSERT OR IGNORE = idempotent: duplicate (dev,boot,seq) is a no-op.
@@ -590,6 +765,18 @@ def push():
     # quarantined records still updates last_seen/fw here, since a
     # quarantined-but-parseable request still proves the device is alive
     # and reachable.
+    # P0-1 remediation (RISK-01, requirement 11: "permanent rejection details
+    # must be auditable in Coviu Device Manager/server logs"): one audit
+    # event per push that quarantined anything, not one per row (a bad batch
+    # of 50 malformed rows would otherwise flood device_events 50x for a
+    # single root cause) -- full detail (every seq+reason) is in detail_json,
+    # already visible via GET /admin/events and /admin/devices/<id>/events.
+    if newly_quarantined:
+        record_event(c, dev, "RECORDS_QUARANTINED", "WARNING",
+                     "%d record(s) permanently quarantined this push (see detail)."
+                     % len(newly_quarantined),
+                     {"quarantined": newly_quarantined})
+
     fw = body.get("fw")
     last_totalizer = max(accepted_totals) if accepted_totals else None
 
@@ -611,13 +798,43 @@ def push():
 
     c.commit()
 
-    # cumulative ack: highest CONTIGUOUS seq held for this device, across ALL
-    # boots — because the device's seq never resets, only continues. Computing
-    # this per-boot (expecting each boot to restart at seq 1) would freeze the
-    # ack after the first reboot and the device queue would grow forever.
+    # cumulative ack: highest CONTIGUOUS seq RESOLVED for this device, across
+    # ALL boots — because the device's seq never resets, only continues.
+    # Computing this per-boot (expecting each boot to restart at seq 1) would
+    # freeze the ack after the first reboot and the device queue would grow
+    # forever.
+    #
+    # P0-1 remediation (RISK-01): "resolved" is the union of accepted
+    # (`records`) AND permanently-quarantined (`quarantined_records`) seqs --
+    # NOT `records` alone. Before this fix, a single permanently-rejected
+    # seq (bad schema_version/record_type/missing field -- see the
+    # acceptance rule above) could never appear in `records`, so the old
+    # contiguous scan over `records` alone would halt at that seq FOREVER,
+    # even though the server had already durably, permanently disposed of
+    # it (stored in quarantined_records, never silently dropped) and even
+    # though every later seq was successfully accepted and stored. The
+    # device's local queue.h::ackThrough() only prunes up to whatever
+    # ack_seq it receives, so a stuck ack_seq meant the device's local
+    # queue could never prune anything past that point -- unbounded local
+    # storage growth until flash exhaustion (RISK-04's silent-loss failure
+    # mode), even though the server-side data was completely safe.
+    #
+    # This is deliberately the SAME wire field (`ack_seq`, a single integer)
+    # the device already understands -- queue.h/sync.h need no change at
+    # all: the watermark now correctly advances past a terminal disposition
+    # of EITHER kind, and firmware's existing "prune everything <= ack_seq"
+    # logic is exactly correct once the watermark itself is computed right.
+    # A seq is "resolved" only once it has a TERMINAL disposition (accepted
+    # or permanently quarantined) -- a seq the server has simply never
+    # received yet is correctly NOT resolved, so the watermark never
+    # advances past genuinely-missing/retryable data (mandate requirement:
+    # "retryable failures must never be treated as terminal").
     rows = c.execute(
-        "SELECT DISTINCT seq FROM records WHERE device_id=? ORDER BY seq",
-        (dev,)).fetchall()
+        "SELECT seq FROM records WHERE device_id=? "
+        "UNION "
+        "SELECT seq FROM quarantined_records WHERE device_id=? AND seq IS NOT NULL "
+        "ORDER BY seq",
+        (dev, dev)).fetchall()
     contig = 0
     for row in rows:
         if row["seq"] == contig + 1:
@@ -626,7 +843,17 @@ def push():
             break
     ack_seq = contig
     c.close()
-    return jsonify(ack_seq=ack_seq, server_time_ms=int(time.time()*1000))
+    resp = {"ack_seq": ack_seq, "server_time_ms": int(time.time() * 1000)}
+    if newly_quarantined:
+        # Additive-only field: existing firmware (sync.h's extractLong_)
+        # looks up "ack_seq" by name and ignores unknown keys entirely, so
+        # this is wire-compatible with every already-fielded device. See
+        # 02_ACK_AND_QUEUE_REMEDIATION.md for why a firmware change was not
+        # required for this fix; this field exists purely for observability
+        # (an operator/log reading the raw HTTP response can see exactly
+        # what happened) and is not consumed by any current firmware logic.
+        resp["quarantined"] = newly_quarantined
+    return jsonify(**resp)
 
 # ------------------------------------------------------------ config endpoint
 @app.route("/api/iot/flow/config", methods=["GET"])
@@ -686,6 +913,7 @@ def firmware_file(fname):
 # "fixed" here without a real admin-auth decision, which is outside what
 # DM-Phase 4's own card asks for.
 @app.route("/admin/devices/provision", methods=["POST"])
+@require_admin("admin")
 def provision_device():
     body = request.get_json(force=True, silent=True) or {}
     device_id = body.get("device_id")
@@ -740,6 +968,7 @@ def provision_device():
 
 
 @app.route("/admin/devices/<device_id>/revoke-key", methods=["POST"])
+@require_admin("admin")
 def revoke_device_key(device_id):
     """§7 (API key rotation/revocation): POST /admin/devices/<id>/rotate-key
     + revoked flag -- this is the revoke half. Reuses require_api_key()'s
@@ -758,6 +987,7 @@ def revoke_device_key(device_id):
 
 
 @app.route("/admin/devices/<device_id>/rotate-key", methods=["POST"])
+@require_admin("admin")
 def rotate_device_key(device_id):
     """§7: generates a fresh key for an already-registered device (e.g.
     suspected key compromise) without a full re-provisioning event. Per
@@ -798,6 +1028,7 @@ def _parse_limit():
 
 
 @app.route("/admin/events", methods=["GET"])
+@require_admin("viewer")
 def list_events():
     limit = _parse_limit()
     c = db()
@@ -809,6 +1040,7 @@ def list_events():
 
 
 @app.route("/admin/devices/<device_id>/events", methods=["GET"])
+@require_admin("viewer")
 def list_device_events(device_id):
     limit = _parse_limit()
     c = db()
@@ -824,6 +1056,7 @@ def list_device_events(device_id):
 # a NEW page, distinct from the existing "/" K-factor dashboard (unchanged
 # below), matching the plan's own naming exactly.
 @app.route("/admin/devices", methods=["GET"])
+@require_admin("viewer")
 def devices_dashboard():
     c = db()
     rows = c.execute(
@@ -885,6 +1118,7 @@ def devices_dashboard():
 
 # ------------------------------------------------------------ admin: K-factor
 @app.route("/admin/kfactor", methods=["POST"])
+@require_admin("admin")
 def set_kfactor():
     k  = float(request.form["k_factor"])
     d  = float(request.form.get("density", 0.84))
@@ -913,6 +1147,7 @@ def set_kfactor():
 
 # ------------------------------------------------------------ admin dashboard
 @app.route("/", methods=["GET"])
+@require_admin("viewer")
 def dashboard():
     c = db()
     cal = c.execute("SELECT * FROM calibration WHERE id=1").fetchone()

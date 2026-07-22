@@ -41,6 +41,11 @@ class DmPhase6LogicalIdTests(unittest.TestCase):
         server.DB = self._orig_db
         os.unlink(self._tmp.name)
 
+    # P0-3 remediation (RISK-03): see test_dm_phase_4_registry.py's identical
+    # comment -- /admin/* now requires HTTP Basic Auth.
+    def _admin_auth(self):
+        return ("admin", server.ADMIN_PASSWORD)
+
     def _provision(self, device_id, asset_label=None):
         body = {"device_id": device_id}
         if asset_label is not None:
@@ -49,6 +54,7 @@ class DmPhase6LogicalIdTests(unittest.TestCase):
             "/admin/devices/provision",
             data=json.dumps(body),
             content_type="application/json",
+            auth=self._admin_auth(),
         )
 
     def _device_row(self, device_id):
@@ -143,7 +149,8 @@ class DmPhase6LogicalIdTests(unittest.TestCase):
     def test_provision_event_records_the_allocated_logical_device_id(self):
         r = self._provision("device-E", asset_label="Test Rig 1")
         logical_id = r.get_json()["logical_device_id"]
-        events = self.client.get("/admin/devices/device-E/events").get_json()["events"]
+        events = self.client.get("/admin/devices/device-E/events",
+                                  auth=self._admin_auth()).get_json()["events"]
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["event_type"], "DEVICE_PROVISIONED")
         self.assertEqual(events[0]["detail"]["logical_device_id"], logical_id)
@@ -152,7 +159,7 @@ class DmPhase6LogicalIdTests(unittest.TestCase):
     def test_devices_dashboard_shows_logical_id_column(self):
         r = self._provision("device-F")
         logical_id = r.get_json()["logical_device_id"]
-        resp = self.client.get("/admin/devices")
+        resp = self.client.get("/admin/devices", auth=self._admin_auth())
         self.assertEqual(resp.status_code, 200)
         self.assertIn(logical_id.encode(), resp.data)
 

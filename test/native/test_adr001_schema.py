@@ -153,9 +153,17 @@ class Adr001SchemaAcceptanceTests(unittest.TestCase):
         row = c.execute("SELECT reason FROM quarantined_records").fetchone()
         c.close()
         self.assertIn("unsupported_schema_version", row["reason"])
-        # accepted-but-not-contiguous quarantine must not stall the ack of
-        # the record that IS valid.
-        self.assertEqual(resp.get_json()["ack_seq"], 1)
+        # P0-1 remediation (RISK-01): a permanently quarantined seq is a
+        # TERMINAL disposition, exactly like an accepted seq -- the
+        # cumulative ack watermark must advance PAST it, not stall at the
+        # last accepted seq before it. Before the fix, this asserted
+        # ack_seq==1 -- i.e. it encoded the ack-gap deadlock bug itself as
+        # "expected" behavior: seq 2's permanent rejection would have frozen
+        # the device's local queue-pruning forever, even though the server
+        # had already durably and permanently disposed of it. See
+        # docs/audit/coviu_oil_meter_p0_remediation/02_ACK_AND_QUEUE_REMEDIATION.md.
+        self.assertEqual(resp.get_json()["ack_seq"], 2)
+        self.assertEqual(resp.get_json()["quarantined"], [{"seq": 2, "reason": "unsupported_schema_version:7"}])
 
     # 6. parser never crashes on unsupported/malformed schema -----------------
     def test_no_crash_on_malformed_or_missing_schema(self):

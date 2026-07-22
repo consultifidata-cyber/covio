@@ -67,6 +67,16 @@ class DmPhase4RegistryTests(unittest.TestCase):
         headers = {"X-Api-Key": key} if key is not None else {}
         return self.client.get("/api/iot/flow/config", headers=headers)
 
+    # P0-3 remediation (RISK-03): every /admin/* route now requires HTTP
+    # Basic Auth (server.ADMIN_PASSWORD is the dev-mode-generated password
+    # for THIS test process's own module import -- see
+    # server._resolve_admin_credentials()/require_admin() -- never a
+    # hardcoded credential, matching RISK-02's own lesson).
+    ADMIN_AUTH = None  # set lazily so it reads server.ADMIN_PASSWORD after import
+
+    def _admin_auth(self):
+        return ("admin", server.ADMIN_PASSWORD)
+
     def _provision(self, device_id, asset_label=None):
         body = {"device_id": device_id}
         if asset_label is not None:
@@ -75,18 +85,19 @@ class DmPhase4RegistryTests(unittest.TestCase):
             "/admin/devices/provision",
             data=json.dumps(body),
             content_type="application/json",
+            auth=self._admin_auth(),
         )
 
     def _revoke(self, device_id):
-        return self.client.post(f"/admin/devices/{device_id}/revoke-key")
+        return self.client.post(f"/admin/devices/{device_id}/revoke-key", auth=self._admin_auth())
 
     def _rotate(self, device_id):
-        return self.client.post(f"/admin/devices/{device_id}/rotate-key")
+        return self.client.post(f"/admin/devices/{device_id}/rotate-key", auth=self._admin_auth())
 
     def _set_kfactor(self, k, density=0.84, t_ref=15.0):
         return self.client.post("/admin/kfactor", data={
             "k_factor": str(k), "density": str(density), "t_ref": str(t_ref),
-        })
+        }, auth=self._admin_auth())
 
     def _device_row(self, device_id):
         c = server.db()
@@ -96,9 +107,9 @@ class DmPhase4RegistryTests(unittest.TestCase):
 
     def _events(self, device_id=None):
         if device_id:
-            resp = self.client.get(f"/admin/devices/{device_id}/events")
+            resp = self.client.get(f"/admin/devices/{device_id}/events", auth=self._admin_auth())
         else:
-            resp = self.client.get("/admin/events")
+            resp = self.client.get("/admin/events", auth=self._admin_auth())
         return resp.get_json()["events"]
 
     # ---- migration + fresh install -----------------------------------------
@@ -195,7 +206,7 @@ class DmPhase4RegistryTests(unittest.TestCase):
 
     def test_provision_requires_device_id(self):
         resp = self.client.post("/admin/devices/provision", data=json.dumps({}),
-                                 content_type="application/json")
+                                 content_type="application/json", auth=self._admin_auth())
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(resp.get_json()["error"]["code"], "DEVICE_ID_REQUIRED")
 
@@ -326,13 +337,13 @@ class DmPhase4RegistryTests(unittest.TestCase):
     def test_fleet_events_endpoint_is_bounded_by_limit(self):
         for i in range(5):
             self._set_kfactor(1000.0 + i)
-        resp = self.client.get("/admin/events?limit=2")
+        resp = self.client.get("/admin/events?limit=2", auth=self._admin_auth())
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(len(resp.get_json()["events"]), 2)
 
     def test_events_endpoint_falls_back_to_default_limit_on_malformed_value(self):
         # Audit fix regression test: ?limit=not-a-number must not 500.
-        resp = self.client.get("/admin/events?limit=not-a-number")
+        resp = self.client.get("/admin/events?limit=not-a-number", auth=self._admin_auth())
         self.assertEqual(resp.status_code, 200)
 
     def test_per_device_events_endpoint_filters_by_device(self):
@@ -345,7 +356,7 @@ class DmPhase4RegistryTests(unittest.TestCase):
     # ---- admin dashboard renders without error -------------------------
     def test_devices_dashboard_renders(self):
         self._provision("device-K", asset_label="Dashboard Smoke Test")
-        resp = self.client.get("/admin/devices")
+        resp = self.client.get("/admin/devices", auth=self._admin_auth())
         self.assertEqual(resp.status_code, 200)
         self.assertIn(b"device-K", resp.data)
         self.assertIn(b"Dashboard Smoke Test", resp.data)
@@ -362,7 +373,7 @@ class DmPhase4RegistryTests(unittest.TestCase):
         c.execute("UPDATE devices SET last_seen_ms=? WHERE device_id=?", (stale_ms, "device-L"))
         c.commit(); c.close()
 
-        resp = self.client.get("/admin/devices")
+        resp = self.client.get("/admin/devices", auth=self._admin_auth())
         self.assertEqual(resp.status_code, 200)
         html = resp.data.decode("utf-8")
         row_start = html.index("device-L")
