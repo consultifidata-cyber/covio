@@ -238,7 +238,15 @@ public:
   // (later Phase 2 tasks); otherwise rows written here would never be read
   // back. See the P2-T5 implementation report for the full rationale.
   void append(const QRow& rowIn) {
+#ifndef NATIVE_TEST
+    // RISK-04 phase-2: the legacy fallback itself is out of scope for the
+    // fault-injection harness (see the #ifndef NATIVE_TEST guard around its
+    // definition below) -- guarded here too so this call is never even
+    // COMPILED under NATIVE_TEST (not just "never taken"), since native
+    // tests always supply a real tot_ (FakeQueueOffsetCheckpoint) and never
+    // exercise this pre-Phase-2 path at all.
     if (!tot_) { appendLegacy_(rowIn); return; }
+#endif
 
     QRow row = rowIn;
     row.magic = QROW_MAGIC;

@@ -245,25 +245,34 @@ TEST(test_valid_failure_slot_survives_corruption_of_alternate_slot) {
     FakeQueueOffsetCheckpoint tot;
     EventQueue q;
     q.begin(&tot, &backend);
-    // Two failures -> two persistFail_() calls -> writes counter 1 (slot B,
-    // odd) then 2 (slot A, even) -- see persistFail_()'s `writes & 1` slot
-    // selection. Slot A (the newer one) now holds the authoritative state.
+    // THREE failures -> three persistFail_() calls. persistFail_()'s slot
+    // selection is `(fail_.writes & 1) ? FAIL_PATH_A : FAIL_PATH_B` --
+    // ODD writes-count -> A, EVEN -> B (verified by direct code reading,
+    // NOT assumed -- an earlier version of this test had this backwards,
+    // caught by actually running it, see the git history for this file).
+    // Call 1: writes=1 (odd)  -> A gets {writes:1, failedWriteCount:1}
+    // Call 2: writes=2 (even) -> B gets {writes:2, failedWriteCount:2}
+    // Call 3: writes=3 (odd)  -> A gets {writes:3, failedWriteCount:3}
+    // So A (writes=3) is the NEWEST/authoritative slot; B (writes=2) is
+    // the next-newest valid fallback.
     backend.failNextAppendOpenSize = true;
     q.append(makeRow(1));
     backend.failNextAppendOpenSize = true;
     q.append(makeRow(1));
-    CHECK(q.failedWriteCount() == 2);
+    backend.failNextAppendOpenSize = true;
+    q.append(makeRow(1));
+    CHECK(q.failedWriteCount() == 3);
   }
-  // Corrupt the NEWER slot (A) -- the recovery logic must fall back to the
-  // older-but-valid slot (B) rather than trusting corrupted bytes or
-  // crashing.
+  // Corrupt the NEWEST slot (A, writes=3) -- the recovery logic must fall
+  // back to the older-but-valid slot (B, writes=2) rather than trusting
+  // corrupted bytes or crashing.
   backend.corruptPath = FAIL_PATH_A;
   {
     FakeQueueOffsetCheckpoint tot2;
     EventQueue q2;
     q2.begin(&tot2, &backend);
     CHECK(q2.hasFailedWrite());
-    CHECK(q2.failedWriteCount() == 1);  // recovered slot B's value (1 write old), not slot A's (2) or zero
+    CHECK(q2.failedWriteCount() == 2);  // recovered slot B's value (writes=2), not slot A's (3, corrupt) or zero
   }
   return true;
 }

@@ -28,6 +28,21 @@
 # (server.py's own module docstring); both are runtime-generated, not source.
 server/covio.db
 server/covio.db-journal
+
+# ---- Native C++ test harness build outputs (test/native_cpp/) ---------------
+# RISK-04/RISK-15 phase-2 remediation: local compiler output (this repo has
+# no dedicated build directory for these, unlike PlatformIO's .pio/ above),
+# never source.
+test/native_cpp/*.exe
+test/native_cpp/*.pdb
+test/native_cpp/*.o
+test/native_cpp/*.log
+
+# NOTE on the *.bin rule above: it is intentionally overridden for specific,
+# deliberately-committed firmware evidence artifacts (built-and-hashed test
+# binaries referenced by the phase-2 audit docs) via `git add -f` at commit
+# time, not by a blanket !-negation pattern here -- keeps the default
+# "don't track binaries" posture intact everywhere else in the tree.
 server/covio.db-wal
 server/covio.db-shm
 server/firmware/*.bin
