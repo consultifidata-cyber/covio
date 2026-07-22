@@ -1,0 +1,23 @@
+# 09 — Configuration Management and Device Manager Audit
+
+Full field-by-field configuration table is in `03_ENTERPRISE_CHECKLIST_15_SECTIONS.md` §8. This file covers the **Coviu Device Manager** (the local Electron app at `tools/device-manager`) specifically, per the user's clarification that this — not a separate cloud product — is what "Coviu Device Manager" refers to.
+
+## What the app actually is (verified by reading its code, not its docs)
+
+- A real Electron desktop application: `package.json` confirms `electron@31.7.7`, `electron-builder`, dependencies `multicast-dns` (mDNS discovery) and `qrcode` (factory QR-label generation).
+- Structure: `src/main/main.js` (main process — `discovery.js` for mDNS browsing, a `deviceStore.json`-backed persistence layer, WiFi-scan helpers), `src/renderer/` (UI views: dashboard, discovery, provisioning, live monitor, diagnostics, OTA, factory test, devices, logs, settings — confirmed present as real files, not stubs, by the real 44-test suite exercising each module).
+- **44/44 real unit tests pass this session** (`npm test`, `node --test`), covering: `provisionDevice()` (posts to the backend's `/admin/devices/provision`), `getInfo`/`getStatus`/`getLogs` (device local-API client), `postConfig` (AP-mode config write, including the `CONFIG_WRITE_FORBIDDEN_NOT_IN_AP_MODE` 403 case), `postFactoryProvision`, the `deviceStore` persistence layer (schema-versioned, corruption-tolerant, confirmed to never leak `api_key`/`wifi_pass` into its persisted JSON — a real, tested security property), mDNS TXT-record parsing, manual-address validation, QR generation, and Windows `netsh`-based WiFi network scanning for the provisioning wizard.
+- **0 ESLint errors, 3 pre-existing warnings** (unused-vars in `discovery.js`, `dashboard.js`, `liveMonitor.js`) — matches the count this repo's own prior RE10 report claimed, now independently re-confirmed for real.
+
+## What this audit did NOT do
+- Did not launch the Electron app interactively (`npm start`) against the live connected device — this would exercise the discovery/provisioning/live-monitor UI paths end-to-end with real device traffic, which RE-9/RE-10 both explicitly flagged as never having been done. This audit's scope was agreed as static analysis and safe local checks; launching a GUI application and interacting with it was judged outside that scope without further explicit direction, though it is very likely low-risk (the app is a read-only/provisioning-only HTTP client) and would be a reasonable next step.
+- Did not exercise the Factory Test view against the connected device's `FACTORY_TEST_BUILD`-gated route (the currently-running firmware on the connected unit is the `esp32dev` bench build, not `factory` — the factory-only `/api/v1/factory/provision` route does not exist in its compiled binary at all, confirmed via the `#if FACTORY_TEST_BUILD` compile-time gate in `local_api.h:51-55`).
+
+## Configuration Management — key findings not fully covered elsewhere
+
+- **"Plant ID" as a distinct concept is ABSENT** anywhere in the system — firmware, NVS schema, and server schema. The closest fields are `asset_id` (declared in the local API contract but hardcoded to `null`, unimplemented) and the server-side `asset_label` (free-text, settable via `/admin/devices/provision`, no format/uniqueness validation found).
+- **Calibration/config version is never exposed via the device's own local API** (`/api/v1/status`/`/metrics`) despite being cached on-device — only visible via the unauthenticated serial console's `show` command. The Device Manager app therefore cannot display it either, since it consumes only the local HTTP API.
+- **Remote reprovisioning wrong-identity risk (Section 14, restated here since it's Device-Manager-relevant):** the desktop app's provisioning flow calls `POST /admin/devices/provision` with an operator-entered `device_id` — there is no cross-check against the physical device actually being provisioned (e.g., confirming the `hardware_id` from a live `/api/v1/info` matches what's being registered) built into the server route itself; the desktop app's own UI flow *may* mitigate this in practice (it discovers devices via mDNS and would typically operate on the correct one), but the backend contract itself does not enforce it.
+
+## Severity and deployment gate
+**P1** for the calibration-version visibility gap and the Plant ID absence (operationally significant for fleet management, not a safety blocker). **P2** for not having interactively exercised the Device Manager against the live device — recommended as a concrete, low-risk next step before relying on it operationally.

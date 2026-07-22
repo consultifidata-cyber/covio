@@ -1,0 +1,71 @@
+# 04 — Failure Injection Results / Failure Scenario Matrix
+
+## What was and wasn't actually tested
+
+**Actually executed this session (real, not simulated):**
+- 3 firmware compiles (`esp32dev` SUCCESS, `release` FAILED-by-design, `factory` SUCCESS).
+- 46 native Python backend tests (all pass).
+- 44 device-manager npm tests (all pass).
+- 1 passive serial capture, during which the device underwent one real, unplanned reset (`USB_UART_CHIP_RESET`) and correctly recovered its totalizer and queue state.
+- 2 real read-only HTTP GETs to the live device's local API (`/api/v1/info`, `/api/v1/status`).
+
+**Not performed, and explicitly not claimed:** any relay-based power cut, any brownout injection, any pulse generator/sensor fault, any OTA attempt (successful or forced-failed), any WiFi/AP power-cycling, any randomized-interruption test campaign, any 30-day soak test. No relay or pulse generator exists in this environment. Every scenario below that would require one of these is marked accordingly — CODE-ONLY where the logic is sound by inspection, NOT PROVEN where hardware evidence would be needed to certify it.
+
+## The 45-scenario matrix
+
+Format per row: Detection / Device behavior / Persistence behavior / Retry / Operator-visible / Remote alert / Recovery trigger / Data-loss possible? / Duplicate possible? / Manual intervention? / Max safe duration / Evidence basis / Verdict.
+
+1. **Internet disconnected** — Detection: push/config HTTP calls fail or time out. Device: keeps sampling normally. Persistence: queue grows. Retry: every `PUSH_PERIOD_MS` (5s), no backoff. Visible: `/api/v1/status.wifi.connected` stays true if WiFi itself is up; `last_sync_ms_ago` grows. Alert: `QUEUE_HIGH`/`CRITICAL` past threshold. Recovery: automatic on internet restoration. Data loss: no (queue durable). Duplicate: no. Manual: none. Max safe duration: bounded by queue capacity (Section 1, ~5.5h soft / ~26h physical, partition size NOT PROVEN). Evidence: CODE-ONLY. **Verdict: PASS (code-sound)**.
+2. **WiFi disconnected** — Detection: `WiFi.status() != WL_CONNECTED`. Device: `wifiService()` reconnects with exponential backoff+jitter (`sync.h:64-75`). Persistence: queue grows. Alert: same as #1 once threshold crossed. Recovery: automatic. Data loss: no. Duplicate: no. Evidence: CODE-ONLY (backoff logic read directly, not exercised on a real dropped AP). **Verdict: PASS (code-sound), NOT PROVEN on real hardware.**
+3. **DNS failure** — Detection: `HTTPClient::begin()`/connect fails. Device: same as network-down path (non-200/failed connect → keep queue, retry). Evidence: CODE-ONLY, inferred from the generic connect-failure path; not a distinct code branch. **Verdict: PARTIAL (no distinct handling, but the generic failure path is safe).**
+4. **TLS certificate failure** — Only applicable when `server_url` is `https://`; today's live device is `http://` so this path is inactive on this unit. Code: `setCACert()` failing a handshake causes `http.begin()`/`POST()` to fail, same safe non-200 path. Never exercised against an actual expired/mismatched cert. **Verdict: NOT PROVEN.**
+5. **Server unavailable** — Same as #1 mechanically. **Verdict: PASS (code-sound).**
+6. **Connection timeout** — Bounded to 8s (push)/6s (config, OTA manifest) by explicit `setTimeout()` calls, confirmed read directly. OTA `.bin` download timeout NOT independently confirmed (library default). **Verdict: PASS for push/config/manifest; NOT PROVEN for OTA binary transfer.**
+7. **API 500** — `code != 200` → keep queue, retry (`sync.h:124-128`). No distinct 500-handling; treated like any non-200. **Verdict: PASS (safe default).**
+8. **API 429** — Server never sends this today (no rate limiting exists, Section 12); if it did, same generic non-200 path applies. **Verdict: PASS (safe default), scenario currently unreachable server-side.**
+9. **API 400/422** — Same generic non-200 path on the device side. Server-side, a malformed *record* (not the whole request) is quarantined, not a 400 (Section 6/RISK-01). A malformed *request* (`"records" not in body`) does return `400` (`server.py:520-521`), confirmed in code. **Verdict: PASS.**
+10. **API 401** — Real, tested: `require_api_key()` returns 401 for missing/wrong/revoked key; 6/6 real passing tests confirm this exact behavior server-side. Device-side: same generic non-200 path, keeps retrying with the same (now-permanently-invalid) key forever, no distinct "your key is bad, stop retrying or alert loudly" handling. **Verdict: PARTIAL — server-side auth is real and tested; device-side has no special handling for "permanently unauthorized" vs. "transient network failure," so a revoked device would retry uselessly forever with no distinct alarm.**
+11. **API 403** — Same as #10 mechanically (e.g. `CONFIG_WRITE_FORBIDDEN_NOT_IN_AP_MODE` is a real, tested 403 case for the config endpoint specifically — confirmed in `local_api.h:164-168`). **Verdict: PASS for the config-write case; generic for push/OTA.**
+12. **HTTP 200 with malformed ack** — Directly re-verified in code this audit (Section 7): `extractLong_()` returns -1, queue is kept, not pruned. **Verdict: PASS, confirmed by direct code re-reading.**
+13. **Server commits but response is lost** — Covered exhaustively in Section 3/7: DB insert is already durable and idempotent; device just resends, no duplication, no loss. **Verdict: PASS.**
+14. **Flash at high-water threshold** — `QUALITY_BACKLOG_HIGH` flag set on subsequent records (`config.h:93`, `telemetry.h` quality bitfield); buffering continues unimpeded. **Verdict: PASS (soft, non-blocking, as designed).**
+15. **Flash completely full** — Write fails, logged, checkpoint not advanced, that specific row is effectively lost with **no distinct alarm** raised (Section 1 finding). **Verdict: FAIL — silent data loss at true capacity, no alarm.**
+16. **LittleFS mount fails** — Halts loudly into a serial-only loop (`covio_firmware.ino:84-88`), confirmed by direct code read. **Verdict: PASS (fails loud, not silent).**
+17. **One queue row corrupt** — CRC32 mismatch → skipped on read, "stream continues" (`queue.h:281-284`). **Verdict: PASS (code-sound), NOT PROVEN via an actual injected corrupt row this session.**
+18. **One segment corrupt** — Same row-level CRC handling applies per-row within the segment; an orphan/interrupted-rollover segment is cleaned up at boot (`queue.h:574-606`). **Verdict: PASS (code-sound), NOT PROVEN via hardware injection.**
+19. **Checkpoint corrupt** — Dual-slot CRC fallback to the other slot (`totalizer.h:185-196`). **Verdict: PASS (code-sound), NOT PROVEN via hardware injection.**
+20. **Ack cursor corrupt** — Same dual-slot fallback (`queue.h:459-467`). **Verdict: PASS (code-sound), NOT PROVEN via hardware injection.**
+21. **Sensor cable disconnected** — No distinct detection exists; the PCNT simply stops incrementing, indistinguishable in code from genuine zero-flow. `pulse_frequency_hz` would read 0/null but no alarm is wired to "prolonged zero flow" (`ADR-015`, disclosed as out of scope by the plan doc itself). **Verdict: ABSENT / NOT PROVEN — no hardware injection performed, and no dedicated code path exists regardless.**
+22. **Sensor noise/bounce** — Mitigated by the PCNT hardware glitch filter (`PCNT_GLITCH_NS=1000`, `totalizer.h:168-169`), a real hardware feature, not application logic. Never stress-tested against actual electrical noise. **Verdict: CODE-ONLY / NOT PROVEN.**
+23. **Implausibly high pulse frequency** — No plausibility check exists anywhere on the counted rate; the architecture simply reports whatever PCNT counts. **Verdict: ABSENT — no upper-bound sanity check exists.**
+24. **Pulse counter overflow** — The 16-bit PCNT register is proactively drained at 30000 (well before its 32767 hardware limit) into a 64-bit accumulator (`totalizer.h:117-120`) — a real, sound design, confirmed by code, never stress-tested with an actual very-high-frequency pulse train. **Verdict: PASS (code-sound), NOT PROVEN under real extreme pulse rates.**
+25. **ESP32 software reboot** — Handled identically to the one real reset observed this session; totalizer/queue recovered correctly. **Verdict: PASS, real evidence this session.**
+26. **Watchdog reboot** — No watchdog is explicitly configured by this application (Section 10); if the framework's own default watchdog ever fired, recovery would presumably follow the same checkpoint-recovery path as any reboot, but this specific trigger was never produced or observed. **Verdict: NOT PROVEN.**
+27. **Brownout** — No brownout was induced. `esp_reset_reason()`'s `ESP_RST_BROWNOUT` case is handled in the reset-reason string mapping (`diagnostics.h:182`), meaning the code *can identify* a brownout reset after the fact, but no actual brownout was produced to confirm the checkpoint-recovery behavior under this specific condition (versus a clean software reset). **Verdict: NOT PROVEN.**
+28. **Power cut during row write** — See Section 3. **Verdict: PASS (code-sound), NOT PROVEN under a real power cut.**
+29. **Power cut during checkpoint write** — See Section 3. **Verdict: PASS (code-sound), NOT PROVEN under a real power cut.**
+30. **Power cut during ack update** — See Section 3. **Verdict: PASS (code-sound), NOT PROVEN under a real power cut.**
+31. **Power cut during segment deletion** — See Section 3 (cursor-persisted-before-delete ordering). **Verdict: PASS (code-sound), NOT PROVEN under a real power cut.**
+32. **Duplicate batch sent** — Real, DB-enforced idempotency (`PRIMARY KEY(device_id,seq)`), confirmed in code and by the schema itself. **Verdict: PASS.**
+33. **Out-of-order batch sent** — Structurally impossible from this firmware (strict FIFO from the persisted cursor); the server would still handle it safely if it somehow occurred (contiguous-ack scan just finds a different set of gaps), but this was not exercised end-to-end. **Verdict: PASS (structural), NOT PROVEN end-to-end.**
+34. **Sequence number reused** — Prevented structurally (`seq` never resets across reboots, `boot_id` mechanism exists precisely to avoid this) — see Section 4. **Verdict: PASS.**
+35. **Device ID changed with backlog present** — Structurally impossible (`device_id` is MAC-derived, no setter exists) — see Section 4/8. **Verdict: PASS (not applicable — cannot happen through any documented path).**
+36. **K-factor changed during active flow** — Firmware-side: each record stamps the `kfactor_version` in effect at the time (`telemetry.h`), a real, sound per-record attribution. Server-side dashboard: **does not** honor per-record `kfactor_version` when displaying consumption, applying the *current* K to the whole historical range instead (Section 8 finding). **Verdict: PARTIAL — correct raw data is stored, but the reference dashboard's display logic is retroactive, not point-in-time.**
+37. **OTA download interrupted** — Delegated to `HTTPUpdate`'s internal handling; `doUpdate_()` logs `HTTP_UPDATE_FAILED` and leaves the device on its current running (already-confirmed) image (`ota.h:176-183`). Never actually interrupted mid-download on real hardware. **Verdict: NOT PROVEN.**
+38. **New firmware fails to boot** — This is exactly what the `pendingVerify_`/`confirmHealthyBoot()` rollback gate exists for (Section 9) — sound design, standard ESP-IDF mechanism, but never actually exercised with a genuinely bad image on this or any hardware. **Verdict: NOT PROVEN — the single highest-consequence untested claim alongside power-cut recovery.**
+39. **NTP unavailable for days** — Not applicable; there is no NTP anywhere in this system (Section 11) — "unavailable" and "available" are indistinguishable states since neither is ever attempted. **Verdict: ABSENT (not a failure mode for a system with no NTP to begin with).**
+40. **Clock moves backward** — Not applicable on-device (no wall clock exists to move). Server-side, if the server's own OS clock moved backward, `recv_ms` values could become non-monotonic relative to insertion order — not tested, and no code exists to detect/correct it. **Verdict: NOT PROVEN / ABSENT.**
+41. **Heap critically low** — No proactive handling exists (Section 10); would presumably crash/reboot via framework default behavior, recovering via the normal checkpoint path afterward. Never actually induced. **Verdict: NOT PROVEN.**
+42. **Reboot loop** — No crash-loop detection or backoff exists (Section 10) — confirmed ABSENT in code, not merely untested. **Verdict: ABSENT.**
+43. **Coviu Device Manager (local Electron app) unavailable** — The device itself has zero dependency on the desktop app for any of its core loop behavior (telemetry/queue/sync/OTA all run independently of whether any Device Manager instance is running or even exists) — confirmed structurally: the app is a pure read-only/write-during-provisioning HTTP client, never a runtime dependency of the device. **Verdict: PASS (device is fully autonomous of the management tool).**
+44. **Remote configuration command duplicated/replayed** — No replay protection exists on `/api/v1/config` (AP-mode) or any `/admin/*` route (Section 8/12) — a captured request genuinely could be replayed. **Verdict: FAIL — confirmed absent, not merely untested.**
+45. **Token expires or is revoked** — Tokens do not expire (no TTL concept exists); revocation is real and tested (`/admin/devices/<id>/revoke-key`, confirmed 401 on next request in `test_dm_phase_4_registry.py`). Device-side reaction to a revoked key is the same generic non-200 retry-forever behavior as scenario #10, with no distinct alarm. **Verdict: PARTIAL.**
+
+## Summary counts
+- **PASS (code-sound and/or real evidence):** 24 of 45.
+- **PARTIAL:** 8 of 45.
+- **FAIL (confirmed, code-provable defect):** 3 of 45 (#15 silent data loss at true flash-full, #36 K-factor retroactivity, #44 no replay protection).
+- **ABSENT (no mechanism exists, confirmed by code, not "untested"):** 5 of 45 (#21 partially, #23, #39, #40 partially, #42).
+- **NOT PROVEN (would require hardware fault injection this audit could not perform):** the power-cut/brownout/watchdog/OTA-interruption/heap-exhaustion family — roughly 14 of 45 touch this category to some degree, most severely #26-31, #37-38, #41.
+
+No scenario in this matrix was marked PASS on the strength of hardware evidence unless a real test or real observed event is explicitly cited above.

@@ -1,0 +1,25 @@
+# .clang-format -- RE-3 (Release Engineering, Code Quality Gates).
+# Firmware (root-level .h/.ino files, per ADR-013's single-source-of-truth
+# layout). Tuned to match this codebase's OBSERVED existing style as
+# closely as possible, specifically so that running clang-format against
+# it later produces a small, reviewable diff rather than a wholesale
+# rewrite -- RE-3 itself does not run this against any existing file (see
+# Docs/CODE_QUALITY.md's "no large-scale reformatting" policy).
+---
+BasedOnStyle: Google
+IndentWidth: 2
+ColumnLimit: 100
+PointerAlignment: Left
+ReferenceAlignment: Left
+BreakBeforeBraces: Attach
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+SpaceBeforeParens: ControlStatements
+NamespaceIndentation: None
+# This codebase's comments are deliberately long-form prose explaining WHY,
+# not WHAT (see CONTRIBUTING.md's own coding standards) -- many already
+# exceed ColumnLimit by design. Reflowing them would fight that convention
+# and produce a huge, low-value diff on first run.
+ReflowComments: false
+SortIncludes: false

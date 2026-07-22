@@ -1,0 +1,34 @@
+# pyproject.toml -- RE-3 (Release Engineering, Code Quality Gates).
+# Covers server/server.py and test/native/*.py. ruff is used for both
+# linting and formatting (one fast tool instead of separately configuring
+# flake8 + black + isort) -- see Docs/CODE_QUALITY.md for the reasoning.
+#
+# Configuration only: RE-3 does not run `ruff format` against any existing
+# file. No Python interpreter/ruff binary has been available in any
+# environment this project has been developed in so far (see VERSIONS.md) --
+# this config is unexecuted here, exactly as disclosed for every other
+# Python-side deliverable in this project's history. See RE-4 for the first
+# actual CI-run verification.
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+exclude = ["__pycache__", ".venv", "venv"]
+
+[tool.ruff.lint]
+# E/W = pycodestyle, F = pyflakes (real-bug-catching: unused imports,
+# undefined names, etc.), I = import sorting.
+select = ["E", "F", "W", "I"]
+# server.py's existing style already uses some intentionally dense,
+# comma-packed one-liners (e.g. multi-import lines, inline SQL parameter
+# tuples) that are a deliberate, reviewed convention, not an oversight --
+# not blanket-ignored here, but noted so a future contributor understands
+# why a line-length or style warning on one of those lines may be an
+# accepted exception rather than something to "fix" reflexively. See
+# Docs/CODE_QUALITY.md's Exceptions section.
+ignore = []
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"

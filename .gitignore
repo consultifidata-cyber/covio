@@ -1,0 +1,101 @@
+# ==============================================================================
+# .gitignore -- Covio Device Manager (root, project-wide)
+# ------------------------------------------------------------------------------
+# RE-1 (Release Engineering, Repository Hygiene & Governance Foundation).
+# This is the project-wide catch-all. tools/device-manager/.gitignore already
+# exists and covers that package's own specifics (node_modules/, dist/,
+# *.log) -- the patterns here are broader/defensive so the SAME kind of
+# generated artifact is never accidentally trackable from anywhere else in
+# the tree, not just that one directory.
+# ==============================================================================
+
+# ---- Firmware build outputs (PlatformIO) ------------------------------------
+# Modern PlatformIO writes to .pio/; .pioenvs/ and .piolibdeps/ are the
+# older (pre-modern-PlatformIO) equivalents, kept here defensively in case
+# any local toolchain still produces them.
+.pio/
+.pioenvs/
+.piolibdeps/
+*.bin
+*.elf
+*.hex
+*.map
+
+# ---- Bench server runtime data (server/server.py) ----------------------------
+# covio.db is generated at first run (init_db()) and holds per-installation
+# device/telemetry data -- never a source artifact. server/firmware/ is
+# where OTA .bin payloads + manifest.json get dropped for local testing
+# (server.py's own module docstring); both are runtime-generated, not source.
+server/covio.db
+server/covio.db-journal
+server/covio.db-wal
+server/covio.db-shm
+server/firmware/*.bin
+server/firmware/manifest.json
+
+# ---- Python ------------------------------------------------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# ---- Node / Electron -----------------------------------------------------
+# Matches anywhere in the tree (no leading slash), not just
+# tools/device-manager/ -- defensive coverage for any future JS package.
+node_modules/
+dist/
+npm-debug.log*
+
+# ---- IDE / editor --------------------------------------------------------
+# RE-8 audit fix: .vscode/extensions.json is explicitly un-ignored (same
+# intent as !.env.example below) -- a shared, checked-in recommended-
+# extensions list is exactly the kind of file that SHOULD be tracked, per
+# SETUP.md's own "VS Code extensions" section. Every other .vscode/ file
+# (settings.json, launch.json, etc.) remains per-developer/local, untracked.
+# NOTE: excludes .vscode/*'s CONTENTS (not the directory itself via a
+# trailing-slash `.vscode/` pattern) specifically so Git still traverses
+# into the directory to evaluate the negation below -- a bare `.vscode/`
+# would prune the whole directory first, silently making
+# `!.vscode/extensions.json` have no effect at all (a real, easy-to-miss
+# .gitignore gotcha: a negation can never re-include a file whose parent
+# directory was itself excluded, only a file excluded via the directory's
+# *contents* pattern).
+.vscode/*
+!.vscode/extensions.json
+.vs/
+.idea/
+*.swp
+*.swo
+
+# ---- OS artifacts --------------------------------------------------------
+.DS_Store
+Thumbs.db
+$RECYCLE.BIN/
+
+# ---- Logs / scratch -------------------------------------------------------
+*.log
+*.tmp
+
+# ---- Secrets / credential material -------------------------------------
+# Audit fix (RE-1 independent audit): defense-in-depth, not a response to an
+# active leak -- no such file currently exists in this repository. Directly
+# ties to ADR-005's own already-frozen requirement that signing/CA key
+# material is "generated and held by Covio and never distributed to the
+# field or committed to source control" (Docs/Firmware Detailed
+# Architecture Decision Record (ADR).md), and to ordinary CI-secret hygiene
+# once RE-4 (GitHub Actions) exists. .env.example (if one is ever added) is
+# explicitly un-ignored, since a documented-safe template is exactly the
+# opposite of a secret.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt

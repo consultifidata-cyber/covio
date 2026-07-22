@@ -1,0 +1,436 @@
+name: CI
+
+# RE-4 (Release Engineering -- Continuous Integration), extended by RE-5
+# (Firmware Build Automation) and RE-7 (Automated GitHub Releases). See
+# Docs/CI_WORKFLOW.md for the full architecture/policy this file
+# implements: job dependency graph, failure policy, required secrets,
+# branch-protection recommendations. This workflow builds and verifies
+# firmware (RE-5) but deliberately does NOT build the Windows installer
+# and does NOT publish releases itself. Desktop packaging (RE-6) lives in
+# a separate workflow, .github/workflows/desktop-package.yml, kept out of
+# this fast push/PR loop on purpose (Docs/DESKTOP_PACKAGING.md). GitHub
+# Release publishing (RE-7) is a separate, tag-triggered workflow,
+# .github/workflows/release.yml, which REUSES this entire workflow via
+# `workflow_call` (see the trigger below) rather than duplicating its
+# steps -- see Docs/RELEASE_AUTOMATION.md.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch: {}
+  # RE-7 (Release Engineering -- Automated GitHub Releases): makes this
+  # entire workflow reusable via `uses: ./.github/workflows/ci.yml` from
+  # release.yml, per RE-7's own explicit "reuse existing workflows instead
+  # of duplicating build logic" requirement -- calling it this way runs
+  # every job in this file (including firmware, desktop, backend,
+  # code-quality), which is deliberate: a release should never publish
+  # without the exact same full verification a normal push/PR gets, not a
+  # narrower subset. `release_version`, when provided, is consumed ONLY by
+  # the `firmware` job (see its own "Stamp release version" step below) --
+  # every other job is completely unaffected by it. Optional and additive:
+  # a normal push/pull_request/workflow_dispatch run never sets it, so
+  # nothing about this workflow's existing, already-audited behavior
+  # changes for its primary use case.
+  workflow_call:
+    inputs:
+      release_version:
+        description: >-
+          Version (no "v" prefix, e.g. "1.2.3") to stamp into config.h's
+          FW_VERSION before building. Omit for normal CI runs, which build
+          whatever FW_VERSION is already committed.
+        required: false
+        type: string
+
+# A new push to the same branch/PR supersedes any run already in progress
+# for it -- avoids burning CI minutes on a commit nobody will look at again.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Audit fix (production-quality audit -- least privilege): no job in this
+# workflow ever writes anything (no commits, no releases, no PR comments) --
+# every job only checks out and reads the repository. Without an explicit
+# `permissions:` block, the GITHUB_TOKEN inherits whatever the repository/
+# organization's own default token permissions are, which can be broader
+# read-write access. `contents: read` is the minimum every job's checkout
+# step actually needs, and the maximum any job here is granted.
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Repository validation -- fail fast, before any heavier job spends CI
+  # minutes against a checkout that's already structurally broken.
+  # ---------------------------------------------------------------------
+  repo-validation:
+    name: Repository Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify required repository structure
+        shell: bash
+        run: |
+          set -uo pipefail
+          missing=0
+          check_file() {
+            if [ ! -f "$1" ]; then
+              echo "::error::Missing required file: $1"
+              missing=1
+            fi
+          }
+          check_dir() {
+            if [ ! -d "$1" ]; then
+              echo "::error::Missing required directory: $1"
+              missing=1
+            fi
+          }
+
+          # Firmware (root-level flat layout, ADR-013)
+          check_file "platformio.ini"
+          check_file "covio_firmware.ino"
+          check_file "config.h"
+
+          # Backend
+          check_file "server/server.py"
+          check_dir "test/native"
+
+          # Desktop app
+          check_file "tools/device-manager/package.json"
+          check_dir "tools/device-manager/src"
+          check_dir "tools/device-manager/test"
+
+          # Desktop packaging (RE-6)
+          check_file "tools/device-manager/scripts/afterAllArtifactBuild.js"
+          check_file ".github/workflows/desktop-package.yml"
+
+          # Release automation (RE-7)
+          check_file ".github/workflows/release.yml"
+
+          # Code quality (RE-3)
+          check_file ".editorconfig"
+          check_file ".clang-format"
+          check_file "pyproject.toml"
+          check_file "requirements-dev.txt"
+          check_file "tools/device-manager/eslint.config.js"
+          check_file "tools/device-manager/.prettierrc.json"
+
+          # Repository hygiene (RE-1)
+          check_file ".gitignore"
+
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::Repository structure validation failed -- see errors above."
+            exit 1
+          fi
+          echo "Repository structure OK."
+
+      - name: Verify required documentation exists
+        shell: bash
+        run: |
+          set -uo pipefail
+          missing=0
+          check_file() {
+            if [ ! -f "$1" ]; then
+              echo "::error::Missing required documentation: $1"
+              missing=1
+            fi
+          }
+
+          check_file "README.md"
+          check_file "CONTRIBUTING.md"
+          check_file "CHANGELOG.md"
+          check_file "LICENSE"
+          check_file "VERSIONS.md"
+          check_file "SCHEMA_REGISTRY.md"
+          check_file "Docs/MASTER_GOVERNANCE.md"
+          check_file "Docs/Covio_Device_Manager_Live_Readiness_Plan.md"
+          check_file "Docs/Firmware Detailed Architecture Decision Record (ADR).md"
+          check_file "Docs/RELEASE_VERSIONING.md"
+          check_file "Docs/CODE_QUALITY.md"
+          check_file "Docs/CI_WORKFLOW.md"
+          check_file "Docs/FIRMWARE_BUILD.md"
+          check_file "Docs/DESKTOP_PACKAGING.md"
+          check_file "Docs/RELEASE_AUTOMATION.md"
+
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::Documentation validation failed -- see errors above."
+            exit 1
+          fi
+          echo "Required documentation present."
+
+  # ---------------------------------------------------------------------
+  # Firmware -- RE-5 (Release Engineering, Firmware Build Automation).
+  # THIS IS THE FIRST REAL COMPILE this project's firmware has ever
+  # undergone -- no compiler/toolchain has been available in any
+  # environment this project was developed in (VERSIONS.md's own
+  # long-disclosed gap). Treat any failure here as a genuine discovery
+  # exercise, not CI flakiness -- see Docs/FIRMWARE_BUILD.md.
+  #
+  # Builds two of the three environments platformio.ini now defines:
+  #   - esp32dev (bench/dev, the environment every DM-Phase was actually
+  #     implemented and reviewed against) -- compile verification only,
+  #     not uploaded.
+  #   - release (RELEASE_BUILD=1, DM-Phase 5/ADR-005) -- "the production
+  #     firmware," uploaded as the versioned artifact
+  #     Docs/RELEASE_VERSIONING.md names.
+  # `factory` (FACTORY_TEST_BUILD=1, DM-Phase 6/ADR-008) is intentionally
+  # NOT built here -- RE-5's own explicit scope is to PREPARE, not yet
+  # implement, factory-build CI support; ADR-008 also requires that image
+  # never be published, so it needs a deliberately different treatment
+  # from routine per-push verification, decided in a later phase, not here.
+  # ---------------------------------------------------------------------
+  firmware:
+    name: Firmware
+    needs: repo-validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python (for PlatformIO Core itself)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Caches PlatformIO's downloaded platform/toolchain/framework
+      # packages (~/.platformio) across runs -- these are large (the
+      # Xtensa toolchain alone is a real download) and don't change unless
+      # platformio.ini's pinned platform version changes, which the cache
+      # key already accounts for.
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: platformio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: |
+            platformio-${{ runner.os }}-
+
+      - name: Install PlatformIO Core
+        # Exact pin (RE-5 / RE-2's own disclosed gap, now resolved) --
+        # reproducibility requires an exact version, not a range. See
+        # VERSIONS.md and Docs/FIRMWARE_BUILD.md for the full reasoning.
+        run: pip install platformio==6.1.15
+
+      - name: Stamp release version into config.h (release builds only)
+        # RE-7: only runs when this workflow is CALLED (workflow_call) with
+        # release_version set -- a normal push/PR/workflow_dispatch run
+        # never sets it, so config.h is left completely untouched in every
+        # case except an actual release build. Editing this ONE line in the
+        # ephemeral checkout (never committed back to the repository) is
+        # what makes the compiled firmware's own embedded FW_VERSION -- not
+        # just the output filename -- actually match the git tag being
+        # released; renaming the file afterward would leave the firmware
+        # self-reporting a stale version via /api/v1/info and OTA's own
+        # ver == FW_VERSION comparison in ota.h.
+        if: ${{ inputs.release_version != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i -E "s/(#define FW_VERSION[[:space:]]+)\"[^\"]+\"/\1\"${{ inputs.release_version }}\"/" config.h
+          echo "Stamped FW_VERSION=${{ inputs.release_version }}"
+          grep '#define FW_VERSION' config.h
+
+      - name: Build bench/dev firmware (esp32dev)
+        run: pio run -e esp32dev
+
+      - name: Build production firmware (release)
+        run: pio run -e release
+
+      - name: Prepare versioned artifacts
+        id: artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN_SRC=".pio/build/release/firmware.bin"
+          ELF_SRC=".pio/build/release/firmware.elf"
+          MAP_SRC=".pio/build/release/firmware.map"
+
+          if [ ! -f "$BIN_SRC" ]; then
+            echo "::error::Expected build output not found at $BIN_SRC -- the release environment did not produce a firmware.bin where PlatformIO's own standard convention says it should."
+            exit 1
+          fi
+          # .elf is PlatformIO's/GCC's own standard linker output for any
+          # successful build -- required, same as .bin. .map is NOT
+          # guaranteed by every toolchain/framework combination without an
+          # explicit linker flag this project has not added (stated
+          # honestly in Docs/FIRMWARE_BUILD.md) -- best-effort: uploaded if
+          # produced, a warning (not a failure) if not.
+          if [ ! -f "$ELF_SRC" ]; then
+            echo "::error::Expected build output not found at $ELF_SRC -- PlatformIO/GCC did not produce a firmware.elf where standard convention says it should."
+            exit 1
+          fi
+
+          # Extract FW_VERSION from config.h without assuming exact
+          # whitespace between the macro name and its value (the real
+          # file uses column-aligned spacing) -- grep the line, then let
+          # sed pull out whatever's between the first quote pair on it.
+          # If the stamping step above ran, this correctly picks up the
+          # stamped value with zero further changes needed here.
+          LINE="$(grep '#define FW_VERSION' config.h || true)"
+          if [ -z "$LINE" ]; then
+            echo "::error::Could not find '#define FW_VERSION' in config.h"
+            exit 1
+          fi
+          VERSION="$(echo "$LINE" | sed -E 's/.*"([^"]+)".*/\1/')"
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not extract a version string from: $LINE"
+            exit 1
+          fi
+
+          mkdir -p artifacts
+          cp "$BIN_SRC" "artifacts/covio-firmware-v${VERSION}.bin"
+          cp "$ELF_SRC" "artifacts/covio-firmware-v${VERSION}.elf"
+          if [ -f "$MAP_SRC" ]; then
+            cp "$MAP_SRC" "artifacts/covio-firmware-v${VERSION}.map"
+          else
+            echo "::warning::No firmware.map produced by this build -- skipping (not every toolchain/framework combination emits one without an explicit linker flag; see Docs/FIRMWARE_BUILD.md). .bin and .elf are still uploaded."
+          fi
+
+          # SHA256 checksum for every real artifact produced, matching
+          # RE-6's own established afterAllArtifactBuild.js convention
+          # exactly (same "<hash>  <filename>" format).
+          for f in artifacts/*; do
+            sha256sum "$f" | sed "s|artifacts/||" > "$f.sha256"
+          done
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Prepared artifacts:"
+          ls -la artifacts/
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-v${{ steps.artifact.outputs.version }}
+          path: artifacts/
+          retention-days: 14
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------
+  # Desktop app -- Windows (the app's actual shipped target) and Ubuntu
+  # (the underlying Node logic is cross-platform; wifiScan.js's own
+  # process.platform branch already degrades gracefully off-Windows --
+  # verified by reading its source, not assumed).
+  # ---------------------------------------------------------------------
+  desktop:
+    name: Desktop App (${{ matrix.os }})
+    needs: repo-validation
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    defaults:
+      run:
+        working-directory: tools/device-manager
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: tools/device-manager/package-lock.json
+
+      - name: Install dependencies (npm ci)
+        run: npm ci
+
+      - name: Lint (ESLint)
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+  # ---------------------------------------------------------------------
+  # Backend -- native Python test suite (test/native/*.py). This is the
+  # first environment in this project's history where these tests will
+  # actually execute -- no Python interpreter has been available in any
+  # environment this project was developed in so far (VERSIONS.md).
+  # ---------------------------------------------------------------------
+  backend:
+    name: Backend (Python)
+    needs: repo-validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install runtime dependency (Flask)
+        # No version pinned -- matches README.md's own existing
+        # `pip install flask` instruction and VERSIONS.md's disclosed,
+        # not-yet-verified status exactly, rather than inventing a pin
+        # this workflow can't yet justify.
+        run: pip install flask
+
+      - name: Run native Python test suite
+        run: python -m unittest discover -s test/native -v
+
+  # ---------------------------------------------------------------------
+  # Code quality -- RE-3's tooling, run for real. Formatting and lint
+  # failures are reported through SEPARATE steps with different failure
+  # behavior (Docs/CODE_QUALITY.md's own already-documented policy):
+  #   - Prettier (formatting): non-blocking today -- 27/27 existing files
+  #     are known to differ (RE-3's own disclosed finding); blocking on it
+  #     now would fail every run before a single new line is involved.
+  #   - ESLint (lint, desktop job above) and ruff check (lint, below):
+  #     BLOCKING -- both are real-bug-catching tools, not just style.
+  # ---------------------------------------------------------------------
+  code-quality:
+    name: Code Quality
+    needs: repo-validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: tools/device-manager/package-lock.json
+
+      - name: Install desktop app dependencies
+        working-directory: tools/device-manager
+        run: npm ci
+
+      - name: Prettier format check (non-blocking)
+        id: prettier
+        continue-on-error: true
+        working-directory: tools/device-manager
+        run: npm run format:check
+
+      - name: Report Prettier result
+        if: always()
+        shell: bash
+        run: |
+          if [ "${{ steps.prettier.outcome }}" = "failure" ]; then
+            echo "::warning::Prettier formatting check found differences. This is a KNOWN, tracked, non-blocking state (see Docs/CODE_QUALITY.md's 'When CI should fail' table) until a dedicated formatting-normalization change lands -- it does not fail this job."
+          else
+            echo "Prettier formatting check passed."
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install ruff
+        run: pip install -r requirements-dev.txt
+
+      - name: Ruff lint check (blocking)
+        run: ruff check server/ test/native/

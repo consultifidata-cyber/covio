@@ -1,0 +1,25 @@
+# .gitattributes -- audit fix (RE-4 production-quality audit, Windows
+# compatibility / hidden runner-environment assumptions finding).
+#
+# GitHub's windows-latest runners default to `git config core.autocrlf
+# true`; without this file, `actions/checkout` could produce CRLF line
+# endings on the Windows leg of RE-4's desktop matrix job while the Ubuntu
+# leg (and every other job) sees LF -- a latent cross-platform checkout
+# inconsistency, independent of anything this repo's own source content
+# does. Forcing a single, explicit line-ending policy at checkout time
+# removes that inconsistency regardless of any individual contributor's or
+# runner's local git configuration.
+#
+# Matches .editorconfig's own `end_of_line = lf` policy (RE-3) exactly --
+# this file is what actually enforces it at the git level; .editorconfig
+# only advises editors.
+* text=auto eol=lf
+
+# Binary firmware/installer artifacts (never checked in as source, but
+# defensively marked binary in case one is ever committed by mistake --
+# e.g. during local testing -- so git never attempts to line-ending-
+# normalize them).
+*.bin binary
+*.exe binary
+*.png binary
+*.ico binary

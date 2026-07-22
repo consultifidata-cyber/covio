@@ -1,0 +1,206 @@
+name: Release
+
+# RE-7 (Release Engineering -- Automated GitHub Releases). See
+# Docs/RELEASE_AUTOMATION.md for the full architecture/policy this file
+# implements.
+#
+# Deliberately a SEPARATE workflow from ci.yml and desktop-package.yml
+# (RE-7's own explicit "keep release automation separate from CI"
+# requirement) -- but REUSES both via `uses:` (GitHub Actions' reusable-
+# workflow mechanism), rather than duplicating their build steps, per
+# RE-7's own explicit "reuse existing workflows where appropriate instead
+# of duplicating build logic" requirement. Neither ci.yml nor
+# desktop-package.yml had its own existing (push/pull_request/
+# workflow_dispatch-triggered) behavior changed by becoming reusable --
+# both gained an additive, optional `workflow_call` trigger only.
+
+on:
+  push:
+    tags:
+      # Two specific, deliberately narrow patterns rather than one loose
+      # wildcard -- matches vX.Y.Z (stable) or vX.Y.Z-rc.N (pre-release,
+      # dot-separated numeric identifier -- see Docs/RELEASE_VERSIONING.md's
+      # own SemVer precedence note on why the dot is required) and nothing
+      # else. determine-version's own step below re-validates this exactly
+      # with a real regex regardless, since GitHub's tag-filter glob syntax
+      # is not a full regex and this match alone should not be fully trusted.
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+'
+
+# One release publish at a time per tag -- not cancel-in-progress (unlike
+# ci.yml's push/PR loop): a release publish is a rare, consequential event,
+# never something to silently cancel mid-flight because of an unrelated
+# trigger.
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Parses the pushed tag into a bare version number (no "v" prefix,
+  # matching config.h/package.json's own convention -- Docs/RELEASE_VERSIONING.md)
+  # and a prerelease flag. Fails loudly, with a real regex (not just the
+  # trigger's own looser glob), on anything that doesn't match exactly.
+  # ---------------------------------------------------------------------
+  determine-version:
+    name: Determine Release Version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+      is_prerelease: ${{ steps.parse.outputs.is_prerelease }}
+    steps:
+      - name: Parse version and prerelease status from tag
+        id: parse
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+            echo "::error::Tag '$TAG' does not match the expected vX.Y.Z or vX.Y.Z-rc.N format (Docs/RELEASE_VERSIONING.md's own SemVer policy) -- refusing to guess how to proceed."
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [[ "$TAG" == *-rc.* ]]; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "Tag $TAG parsed as version=$VERSION -- PRE-RELEASE"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "Tag $TAG parsed as version=$VERSION -- stable release"
+          fi
+
+  # ---------------------------------------------------------------------
+  # Reuses RE-4/RE-5's ci.yml wholesale -- runs repo-validation, firmware
+  # (compile-verify esp32dev + build/upload the versioned release
+  # artifacts, stamped to this exact tag's version), desktop (lint+test on
+  # both OSes), backend (native Python suite), and code-quality. A release
+  # never publishes without the exact same full verification a normal
+  # push/PR gets -- not a narrower, release-specific subset.
+  # ---------------------------------------------------------------------
+  verify-and-build-firmware:
+    name: Verify + Build Firmware
+    needs: determine-version
+    uses: ./.github/workflows/ci.yml
+    with:
+      release_version: ${{ needs.determine-version.outputs.version }}
+    permissions:
+      contents: read
+
+  # ---------------------------------------------------------------------
+  # Reuses RE-6's desktop-package.yml wholesale -- only after ci.yml's own
+  # full suite (including the desktop app's own lint/test) has already
+  # passed, so packaging never runs against code that failed verification.
+  # ---------------------------------------------------------------------
+  package-desktop:
+    name: Package Desktop App
+    needs: [determine-version, verify-and-build-firmware]
+    uses: ./.github/workflows/desktop-package.yml
+    with:
+      release_version: ${{ needs.determine-version.outputs.version }}
+    permissions:
+      contents: read
+
+  # ---------------------------------------------------------------------
+  # Downloads every artifact the two reused workflows produced, verifies
+  # each expected file exists under EXACTLY the name
+  # Docs/RELEASE_VERSIONING.md defines (never trusting the upload succeeded
+  # correctly without checking), then publishes the GitHub Release. This is
+  # the ONLY job in this entire project (across CI, firmware build,
+  # desktop packaging, and release automation) that is ever granted
+  # `contents: write` -- every other job, in every workflow, remains
+  # read-only.
+  # ---------------------------------------------------------------------
+  publish:
+    name: Publish GitHub Release
+    needs: [determine-version, verify-and-build-firmware, package-desktop]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # contents: write is what actually lets `gh release create` publish --
+    # the only job, across every workflow in this project, ever granted
+    # write access. actions: read is added explicitly (audit fix, RE-7's
+    # own self-audit) rather than assumed: once a workflow declares its own
+    # `permissions:` block, every unlisted scope defaults to `none`, and
+    # this job's first three steps (actions/download-artifact@v4, pulling
+    # artifacts uploaded by upstream jobs in this same run) should not
+    # silently depend on an ambient default that a future edit elsewhere
+    # in this file could remove.
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Download firmware artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: firmware-v${{ needs.determine-version.outputs.version }}
+          path: release-assets/firmware
+
+      - name: Download Windows installer
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+          path: release-assets/desktop
+
+      - name: Download Windows portable package
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-portable
+          path: release-assets/desktop
+
+      - name: Verify release assets match Docs/RELEASE_VERSIONING.md
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.determine-version.outputs.version }}"
+          missing=0
+          check() {
+            if [ ! -f "$1" ]; then
+              echo "::error::Expected release asset not found or misnamed: $1"
+              missing=1
+            fi
+          }
+
+          check "release-assets/firmware/covio-firmware-v${VERSION}.bin"
+          check "release-assets/firmware/covio-firmware-v${VERSION}.bin.sha256"
+          check "release-assets/firmware/covio-firmware-v${VERSION}.elf"
+          check "release-assets/firmware/covio-firmware-v${VERSION}.elf.sha256"
+          check "release-assets/desktop/covio-device-manager-setup-v${VERSION}.exe"
+          check "release-assets/desktop/covio-device-manager-setup-v${VERSION}.exe.sha256"
+          check "release-assets/desktop/covio-device-manager-v${VERSION}-portable.exe"
+          check "release-assets/desktop/covio-device-manager-v${VERSION}-portable.exe.sha256"
+
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::One or more required release assets are missing or incorrectly named -- see errors above. Refusing to publish an incomplete or misnamed Release."
+            exit 1
+          fi
+          echo "All required release assets present and correctly named."
+
+          # firmware.map is best-effort (ci.yml's own firmware job,
+          # Docs/FIRMWARE_BUILD.md) -- included if present, never required.
+          if [ -f "release-assets/firmware/covio-firmware-v${VERSION}.map" ]; then
+            echo "firmware.map present -- will be included in the release."
+          else
+            echo "::warning::firmware.map was not produced for this release (best-effort artifact -- see Docs/FIRMWARE_BUILD.md). Publishing without it."
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          PRERELEASE_ARGS=()
+          if [ "${{ needs.determine-version.outputs.is_prerelease }}" = "true" ]; then
+            PRERELEASE_ARGS=(--prerelease)
+          fi
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            --title "Covio Device Manager $TAG" \
+            --generate-notes \
+            "${PRERELEASE_ARGS[@]}" \
+            release-assets/firmware/* \
+            release-assets/desktop/*

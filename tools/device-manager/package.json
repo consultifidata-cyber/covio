@@ -1,0 +1,55 @@
+{
+  "name": "covio-device-manager",
+  "productName": "Covio Device Manager",
+  "version": "0.1.0",
+  "description": "Discover, monitor, and provision Covio Oil Flow Meter devices over the local network -- no USB cable required. Consumes the DM-Phase 1 read-only local API and the DM-Phase 2 provisioning API exactly as frozen in the Live Readiness Plan's Appendix A.",
+  "private": true,
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test",
+    "dist": "electron-builder",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "author": "Covio",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "multicast-dns": "^7.2.5",
+    "qrcode": "^1.5.3"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3",
+    "@eslint/js": "^9.9.0",
+    "eslint": "^9.9.0",
+    "prettier": "^3.3.0"
+  },
+  "build": {
+    "appId": "com.covio.devicemanager",
+    "productName": "Covio Device Manager",
+    "copyright": "Copyright © 2026 Covio",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "afterAllArtifactBuild": "scripts/afterAllArtifactBuild.js",
+    "forceCodeSigning": false,
+    "win": {
+      "target": ["nsis", "portable"],
+      "executableName": "CovioDeviceManager"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "covio-device-manager-setup-v${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "covio-device-manager-v${version}-portable.${ext}"
+    }
+  }
+}

@@ -1,0 +1,41 @@
+# EditorConfig -- RE-3 (Release Engineering, Code Quality Gates).
+# Applies repo-wide, across all three components (firmware, backend,
+# desktop app) and every editor/IDE that reads this file natively or via a
+# plugin. See Docs/CODE_QUALITY.md for the full formatting/lint policy this
+# is one part of.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+
+# ---- Firmware (C++ / Arduino) -- matches this codebase's existing 2-space
+# convention, observed consistently across every .h/.ino file.
+[*.{h,hpp,c,cpp,ino}]
+indent_size = 2
+
+# ---- Backend (Python) -- PEP 8's 4-space convention.
+[*.py]
+indent_size = 4
+
+# ---- Desktop app (JS/JSON/HTML/CSS) -- matches this codebase's existing
+# 2-space convention (see tools/device-manager/.prettierrc.json for the
+# fuller JS-specific policy this complements, not duplicates).
+[*.{js,json,html,css}]
+indent_size = 2
+
+# ---- Config/data formats commonly hand-edited alongside the above.
+[*.{yml,yaml,ini}]
+indent_size = 2
+
+# Markdown: trailing whitespace can be meaningful (hard line breaks) --
+# don't strip it.
+[*.md]
+trim_trailing_whitespace = false
+indent_size = 2
+
+[Makefile]
+indent_style = tab
