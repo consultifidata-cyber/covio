@@ -138,8 +138,38 @@ public:
     q_->ackThrough((uint32_t)ackSeq, st_->bootId());
     lastSyncMs_ = millis();                // DM-Phase 1: getter only, no behavior change
     haveSync_   = true;
+
+    // RISK-16 remediation (OTA manifest authenticity): this device has no
+    // RTC/NTP (RISK-11, unchanged, pre-existing gap) -- the only wall-clock
+    // signal it ever receives at all is server_time_ms, already returned by
+    // every successful push (server.py's push() response). Captured here,
+    // purely as a best-effort estimate for manifest expiry checks (ota.h) --
+    // NOT used for anything telemetry-timestamp-related (QRow.ts remains
+    // device-uptime-seconds, unchanged, exactly as SCHEMA_REGISTRY.md
+    // documents). If this device has never successfully pushed yet,
+    // haveServerTime() is false and ota.h treats manifest expiry as
+    // unverifiable (fails closed -- see ota.h's own comment).
+    long serverTimeMs = extractLong_(resp, "server_time_ms");
+    if (serverTimeMs >= 0) {
+      serverUnixS_ = serverTimeMs / 1000;
+      serverTimeCapturedAtMs_ = millis();
+      haveServerTime_ = true;
+    }
+
     Serial.printf("[SYNC] acked_seq=%ld (sent %d)\n", ackSeq, n);
     return true;
+  }
+
+  // RISK-16 remediation: getters only, no behavior change to push/ack logic.
+  bool haveServerTime() { return haveServerTime_; }
+  // Best-effort estimate of the current unix time (seconds), extrapolated
+  // from the last server_time_ms this device actually received plus
+  // elapsed device uptime since then. Accuracy degrades with time since
+  // the last successful push (no drift correction beyond that -- this
+  // device has no independent clock source at all to cross-check against).
+  long estimatedUnixNow() {
+    if (!haveServerTime_) return -1;
+    return serverUnixS_ + (long)((millis() - serverTimeCapturedAtMs_) / 1000);
   }
 
   // ---- Poll K-factor / calibration config ----
@@ -218,4 +248,9 @@ private:
   uint32_t lastSyncMs_ = 0;           // last successful push-ack OR config-poll 200
   int      lastPushHttpCode_ = -1;    // -1 = no push attempted yet this boot
   uint32_t lastPushRttMs_ = 0;        // DM-Phase 1: valid iff lastPushHttpCode_ != -1
+
+  // RISK-16 remediation (OTA manifest authenticity -- expiry checks)
+  bool     haveServerTime_ = false;
+  long     serverUnixS_ = 0;
+  uint32_t serverTimeCapturedAtMs_ = 0;
 };

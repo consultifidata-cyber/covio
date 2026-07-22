@@ -353,6 +353,16 @@ jobs:
         working-directory: test/native_cpp
         run: ./test_ota_version_policy
 
+      - name: Compile RISK-16 OTA manifest authenticity tests
+        working-directory: test/native_cpp
+        run: |
+          g++ -std=c++14 -Wall -I../.. \
+            test_ota_manifest_auth.cpp -o test_ota_manifest_auth
+
+      - name: Run RISK-16 OTA manifest authenticity tests
+        working-directory: test/native_cpp
+        run: ./test_ota_manifest_auth
+
   # ---------------------------------------------------------------------
   # Desktop app -- Windows (the app's actual shipped target) and Ubuntu
   # (the underlying Node logic is cross-platform; wifiScan.js's own
@@ -417,6 +427,9 @@ jobs:
         # not-yet-verified status exactly, rather than inventing a pin
         # this workflow can't yet justify.
         run: pip install flask
+
+      - name: Install RISK-16 signing-tool test dependency (cryptography)
+        run: pip install -r requirements-dev.txt
 
       - name: Run native Python test suite
         run: python -m unittest discover -s test/native -v

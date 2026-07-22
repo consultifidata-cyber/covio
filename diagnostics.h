@@ -100,6 +100,15 @@ public:
     } else {
       s += ",\"last_reject_reason\":null";
     }
+    // RISK-16 remediation: manifest-authenticity rejection reason, separate
+    // from RISK-15's anti-downgrade reason above -- an operator needs to
+    // tell "this was a downgrade" apart from "this manifest's signature
+    // didn't verify" apart from "the device has no time estimate yet".
+    if (ota.lastAuthRejectReason() != OTA_AUTH_OK) {
+      s += ",\"last_auth_reject_reason\":\"" + String(otaAuthVerdictStr(ota.lastAuthRejectReason())) + "\"";
+    } else {
+      s += ",\"last_auth_reject_reason\":null";
+    }
     s += "}";
     s += ",\"health_state\":\"" + healthState + "\"";
     s += "}";

@@ -38,6 +38,11 @@ test/native_cpp/*.pdb
 test/native_cpp/*.o
 test/native_cpp/*.log
 
+# ---- RISK-16 remediation: OTA manifest signing key -------------------------
+# NEVER committed, test or otherwise -- server/tools/sign_manifest.py
+# --gen-test-key writes it here for local/CI use only.
+server/tools/.test_signing_key.pem
+
 # NOTE on the *.bin rule above: it is intentionally overridden for specific,
 # deliberately-committed firmware evidence artifacts (built-and-hashed test
 # binaries referenced by the phase-2 audit docs) via `git add -f` at commit

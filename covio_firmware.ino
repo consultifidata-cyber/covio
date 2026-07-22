@@ -221,7 +221,8 @@ void loop() {
   // ---- check for firmware updates ----
   if (now - tOta >= OTA_POLL_MS) {
     tOta = now;
-    ota.poll(syncEngine.online());    // DM-Phase 2: WiFi-authority consolidation -- may download + reboot into new image
+    ota.poll(syncEngine.online(), syncEngine);    // DM-Phase 2: WiFi-authority consolidation -- may download + reboot into new image.
+                                                   // RISK-16: syncEngine also supplies the best-effort time estimate for manifest expiry checks.
   }
 
   delay(5);                           // yield

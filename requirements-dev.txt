@@ -10,3 +10,11 @@
 # once RE-4's CI runner (which does have Python preinstalled) actually
 # installs and runs this for the first time.
 ruff>=0.6.0
+
+# RISK-16 remediation (OTA manifest authenticity): server/tools/sign_manifest.py
+# (release-signing tool, never shipped in firmware) and its test,
+# test/native/test_sign_manifest_tool.py, need real ECDSA/PEM support.
+# Confirmed working this session at v49.0.0; loose lower bound for the same
+# reason as ruff above (no CI-verified exact pin has ever existed for this
+# project's Python dependencies).
+cryptography>=42.0.0
