@@ -1,0 +1,132 @@
+test_current_schema_accepted (test_adr001_schema.Adr001SchemaAcceptanceTests.test_current_schema_accepted) ... ok
+test_mixed_version_batch_accepted (test_adr001_schema.Adr001SchemaAcceptanceTests.test_mixed_version_batch_accepted) ... ok
+test_no_crash_on_malformed_or_missing_schema (test_adr001_schema.Adr001SchemaAcceptanceTests.test_no_crash_on_malformed_or_missing_schema) ... ok
+test_previous_schema_accepted_once_registered (test_adr001_schema.Adr001SchemaAcceptanceTests.test_previous_schema_accepted_once_registered) ... ok
+test_unknown_schema_rejected (test_adr001_schema.Adr001SchemaAcceptanceTests.test_unknown_schema_rejected) ... ok
+test_unsupported_version_quarantined_alongside_accepted (test_adr001_schema.Adr001SchemaAcceptanceTests.test_unsupported_version_quarantined_alongside_accepted) ... ok
+test_bootstrap_seed_keeps_existing_bench_devices_working (test_dm_phase_0b_auth.DmPhase0bAuthTests.test_bootstrap_seed_keeps_existing_bench_devices_working) ... ok
+test_missing_key_rejected (test_dm_phase_0b_auth.DmPhase0bAuthTests.test_missing_key_rejected) ... ok
+test_rejected_push_writes_nothing_at_all_not_even_quarantine (test_dm_phase_0b_auth.DmPhase0bAuthTests.test_rejected_push_writes_nothing_at_all_not_even_quarantine) ... ok
+test_revoked_key_rejected (test_dm_phase_0b_auth.DmPhase0bAuthTests.test_revoked_key_rejected) ... ok
+test_valid_key_unchanged_behavior (test_dm_phase_0b_auth.DmPhase0bAuthTests.test_valid_key_unchanged_behavior) ... ok
+test_wrong_key_rejected (test_dm_phase_0b_auth.DmPhase0bAuthTests.test_wrong_key_rejected) ... ok
+test_config_poll_touches_last_seen_but_never_creates_a_row (test_dm_phase_4_registry.DmPhase4RegistryTests.test_config_poll_touches_last_seen_but_never_creates_a_row) ... ok
+test_dashboard_shows_offline_for_a_stale_device_not_stuck_on_ok_forever (test_dm_phase_4_registry.DmPhase4RegistryTests.test_dashboard_shows_offline_for_a_stale_device_not_stuck_on_ok_forever) ... ok
+test_devices_dashboard_renders (test_dm_phase_4_registry.DmPhase4RegistryTests.test_devices_dashboard_renders) ... ok
+test_events_endpoint_falls_back_to_default_limit_on_malformed_value (test_dm_phase_4_registry.DmPhase4RegistryTests.test_events_endpoint_falls_back_to_default_limit_on_malformed_value) ... ok
+test_existing_bootstrap_key_still_works_unmodified (test_dm_phase_4_registry.DmPhase4RegistryTests.test_existing_bootstrap_key_still_works_unmodified) ... ok
+test_fleet_events_endpoint_is_bounded_by_limit (test_dm_phase_4_registry.DmPhase4RegistryTests.test_fleet_events_endpoint_is_bounded_by_limit) ... ok
+test_fresh_install_devices_table_has_new_shape_and_bootstrap_row (test_dm_phase_4_registry.DmPhase4RegistryTests.test_fresh_install_devices_table_has_new_shape_and_bootstrap_row) ... ok
+test_migration_from_dm_phase_0b_shape_preserves_existing_rows (test_dm_phase_4_registry.DmPhase4RegistryTests.test_migration_from_dm_phase_0b_shape_preserves_existing_rows) ... ok
+test_migration_is_idempotent_across_repeated_init_db_calls (test_dm_phase_4_registry.DmPhase4RegistryTests.test_migration_is_idempotent_across_repeated_init_db_calls) ... ok
+test_migration_survives_an_orphaned_devices_new_from_an_interrupted_attempt (test_dm_phase_4_registry.DmPhase4RegistryTests.test_migration_survives_an_orphaned_devices_new_from_an_interrupted_attempt) ... ok
+test_missing_and_wrong_key_still_rejected_unmodified (test_dm_phase_4_registry.DmPhase4RegistryTests.test_missing_and_wrong_key_still_rejected_unmodified) ... ok
+test_newly_provisioned_key_authenticates_device_requests (test_dm_phase_4_registry.DmPhase4RegistryTests.test_newly_provisioned_key_authenticates_device_requests) ... ok
+test_per_device_events_endpoint_filters_by_device (test_dm_phase_4_registry.DmPhase4RegistryTests.test_per_device_events_endpoint_filters_by_device) ... ok
+test_provision_issues_unique_key_and_traceable_event (test_dm_phase_4_registry.DmPhase4RegistryTests.test_provision_issues_unique_key_and_traceable_event) ... ok
+test_provision_requires_device_id (test_dm_phase_4_registry.DmPhase4RegistryTests.test_provision_requires_device_id) ... ok
+test_quarantined_records_do_not_poison_last_push_totalizer (test_dm_phase_4_registry.DmPhase4RegistryTests.test_quarantined_records_do_not_poison_last_push_totalizer) ... ok
+test_revoke_rejects_next_request_from_that_device (test_dm_phase_4_registry.DmPhase4RegistryTests.test_revoke_rejects_next_request_from_that_device) ... ok
+test_revoke_unknown_device_returns_404 (test_dm_phase_4_registry.DmPhase4RegistryTests.test_revoke_unknown_device_returns_404) ... ok
+test_rotate_replaces_key_old_key_stops_working_new_key_works (test_dm_phase_4_registry.DmPhase4RegistryTests.test_rotate_replaces_key_old_key_stops_working_new_key_works) ... ok
+test_rotate_unknown_device_returns_404 (test_dm_phase_4_registry.DmPhase4RegistryTests.test_rotate_unknown_device_returns_404) ... ok
+test_three_consecutive_kfactor_edits_produce_three_events (test_dm_phase_4_registry.DmPhase4RegistryTests.test_three_consecutive_kfactor_edits_produce_three_events) ... ok
+test_twin_created_by_first_push_from_a_never_provisioned_device (test_dm_phase_4_registry.DmPhase4RegistryTests.test_twin_created_by_first_push_from_a_never_provisioned_device) ... ok
+test_twin_updates_after_successful_push (test_dm_phase_4_registry.DmPhase4RegistryTests.test_twin_updates_after_successful_push) ... ok
+test_allocate_logical_device_id_format_and_sequential (test_dm_phase_6_logical_id.DmPhase6LogicalIdTests.test_allocate_logical_device_id_format_and_sequential) ... ok
+test_allocate_logical_device_id_never_collides_across_many_calls (test_dm_phase_6_logical_id.DmPhase6LogicalIdTests.test_allocate_logical_device_id_never_collides_across_many_calls) ... ok
+test_devices_dashboard_shows_logical_id_column (test_dm_phase_6_logical_id.DmPhase6LogicalIdTests.test_devices_dashboard_shows_logical_id_column) ... ok
+test_migration_adds_logical_device_id_column_and_index (test_dm_phase_6_logical_id.DmPhase6LogicalIdTests.test_migration_adds_logical_device_id_column_and_index) ... ok
+test_migration_from_a_pre_dm_phase_6_devices_table_adds_the_column (test_dm_phase_6_logical_id.DmPhase6LogicalIdTests.test_migration_from_a_pre_dm_phase_6_devices_table_adds_the_column) ... ok
+test_migration_is_idempotent_across_repeated_init_db_calls (test_dm_phase_6_logical_id.DmPhase6LogicalIdTests.test_migration_is_idempotent_across_repeated_init_db_calls) ... ok
+test_provision_assigns_unique_sequential_logical_ids_to_different_devices (test_dm_phase_6_logical_id.DmPhase6LogicalIdTests.test_provision_assigns_unique_sequential_logical_ids_to_different_devices) ... ok
+test_provision_event_records_the_allocated_logical_device_id (test_dm_phase_6_logical_id.DmPhase6LogicalIdTests.test_provision_event_records_the_allocated_logical_device_id) ... ok
+test_provision_response_still_carries_every_pre_dm_phase_6_field (test_dm_phase_6_logical_id.DmPhase6LogicalIdTests.test_provision_response_still_carries_every_pre_dm_phase_6_field) ... ok
+test_provisioned_at_ms_still_updates_on_reprovision_despite_stable_id (test_dm_phase_6_logical_id.DmPhase6LogicalIdTests.test_provisioned_at_ms_still_updates_on_reprovision_despite_stable_id) ... ok
+test_reprovisioning_an_already_id_assigned_device_keeps_the_same_id (test_dm_phase_6_logical_id.DmPhase6LogicalIdTests.test_reprovisioning_an_already_id_assigned_device_keeps_the_same_id) ... ok
+test_ack_seq_is_monotonic_never_regresses_across_pushes (test_p0_1_ack_gap_remediation.P0_1_AckGapRemediationTests.test_ack_seq_is_monotonic_never_regresses_across_pushes) ... ok
+test_all_accepted_ack_advances_to_last (test_p0_1_ack_gap_remediation.P0_1_AckGapRemediationTests.test_all_accepted_ack_advances_to_last) ... ok
+test_concurrent_duplicate_pushes_produce_exactly_one_stored_row (test_p0_1_ack_gap_remediation.P0_1_AckGapRemediationTests.test_concurrent_duplicate_pushes_produce_exactly_one_stored_row) ... ok
+test_first_record_rejected_later_accepted_ack_advances_past_it (test_p0_1_ack_gap_remediation.P0_1_AckGapRemediationTests.test_first_record_rejected_later_accepted_ack_advances_past_it) ... ok
+test_genuine_gap_in_receipt_correctly_halts_ack_not_treated_as_resolved (test_p0_1_ack_gap_remediation.P0_1_AckGapRemediationTests.test_genuine_gap_in_receipt_correctly_halts_ack_not_treated_as_resolved) ... ok
+test_last_record_rejected_ack_still_advances_past_it (test_p0_1_ack_gap_remediation.P0_1_AckGapRemediationTests.test_last_record_rejected_ack_still_advances_past_it) ... ok
+test_middle_record_rejected_ack_advances_past_it (test_p0_1_ack_gap_remediation.P0_1_AckGapRemediationTests.test_middle_record_rejected_ack_advances_past_it) ... ok
+test_no_per_record_retryable_state_exists_by_design (test_p0_1_ack_gap_remediation.P0_1_AckGapRemediationTests.test_no_per_record_retryable_state_exists_by_design) ... ok
+test_out_of_order_batch_ack_still_only_advances_through_contiguous_prefix (test_p0_1_ack_gap_remediation.P0_1_AckGapRemediationTests.test_out_of_order_batch_ack_still_only_advances_through_contiguous_prefix) ... ok
+test_out_of_order_batch_with_a_gap_still_halts_correctly (test_p0_1_ack_gap_remediation.P0_1_AckGapRemediationTests.test_out_of_order_batch_with_a_gap_still_halts_correctly) ... ok
+test_quarantine_and_its_audit_event_survive_a_process_restart (test_p0_1_ack_gap_remediation.P0_1_AckGapRemediationTests.test_quarantine_and_its_audit_event_survive_a_process_restart) ... ok
+test_quarantine_resolves_immediately_in_the_same_push_that_produced_it (test_p0_1_ack_gap_remediation.P0_1_AckGapRemediationTests.test_quarantine_resolves_immediately_in_the_same_push_that_produced_it) ... ok
+test_replayed_batch_is_idempotent_and_ack_unchanged (test_p0_1_ack_gap_remediation.P0_1_AckGapRemediationTests.test_replayed_batch_is_idempotent_and_ack_unchanged) ... ok
+test_replayed_batch_with_quarantined_record_does_not_double_quarantine (test_p0_1_ack_gap_remediation.P0_1_AckGapRemediationTests.test_replayed_batch_with_quarantined_record_does_not_double_quarantine) ... ok
+test_admin_role_succeeds_on_every_admin_route (test_p0_3_admin_auth.P0_3_AdminAuthTests.test_admin_role_succeeds_on_every_admin_route) ... ok
+test_admin_routes_never_echo_the_admin_password_itself (test_p0_3_admin_auth.P0_3_AdminAuthTests.test_admin_routes_never_echo_the_admin_password_itself) ... ok
+test_anonymous_access_rejected_for_every_admin_route (test_p0_3_admin_auth.P0_3_AdminAuthTests.test_anonymous_access_rejected_for_every_admin_route) ... ok
+test_dev_mode_with_no_password_set_generates_one_never_a_hardcoded_default (test_p0_3_admin_auth.P0_3_AdminAuthTests.test_dev_mode_with_no_password_set_generates_one_never_a_hardcoded_default) ... ok
+test_failed_admin_auth_is_recorded_in_device_events (test_p0_3_admin_auth.P0_3_AdminAuthTests.test_failed_admin_auth_is_recorded_in_device_events) ... ok
+test_kfactor_form_post_authenticates_via_basic_auth_header (test_p0_3_admin_auth.P0_3_AdminAuthTests.test_kfactor_form_post_authenticates_via_basic_auth_header) ... ok
+test_production_mode_with_a_real_password_starts_cleanly (test_p0_3_admin_auth.P0_3_AdminAuthTests.test_production_mode_with_a_real_password_starts_cleanly) ... ok
+test_production_mode_with_obvious_placeholder_password_fails_closed (test_p0_3_admin_auth.P0_3_AdminAuthTests.test_production_mode_with_obvious_placeholder_password_fails_closed) ... ok
+test_production_mode_without_password_fails_closed (test_p0_3_admin_auth.P0_3_AdminAuthTests.test_production_mode_without_password_fails_closed) ... ok
+test_rate_limit_window_is_per_source_address_not_global (test_p0_3_admin_auth.P0_3_AdminAuthTests.test_rate_limit_window_is_per_source_address_not_global) ... ok
+test_repeated_auth_failures_are_rate_limited (test_p0_3_admin_auth.P0_3_AdminAuthTests.test_repeated_auth_failures_are_rate_limited) ... ok
+test_successful_sensitive_operations_remain_individually_audited (test_p0_3_admin_auth.P0_3_AdminAuthTests.test_successful_sensitive_operations_remain_individually_audited) ... ok
+test_viewer_role_accepted_on_read_only_routes (test_p0_3_admin_auth.P0_3_AdminAuthTests.test_viewer_role_accepted_on_read_only_routes) ... ok
+test_viewer_role_rejected_on_admin_only_mutating_routes (test_p0_3_admin_auth.P0_3_AdminAuthTests.test_viewer_role_rejected_on_admin_only_mutating_routes) ... ok
+test_wrong_admin_password_rejected (test_p0_3_admin_auth.P0_3_AdminAuthTests.test_wrong_admin_password_rejected) ... ok
+test_canonical_string_field_order_and_delimiter (test_sign_manifest_tool.SignManifestToolTests.test_canonical_string_field_order_and_delimiter) ... ok
+test_gen_test_key_refuses_to_overwrite_existing_key (test_sign_manifest_tool.SignManifestToolTests.test_gen_test_key_refuses_to_overwrite_existing_key) ... REFUSING to overwrite existing key at C:\Users\Dell\AppData\Local\Temp\tmp4hr70uba\test_key.pem -- remove it first if you really want a new one.
+ok
+test_image_hash_is_the_real_sha256_of_the_image_file (test_sign_manifest_tool.SignManifestToolTests.test_image_hash_is_the_real_sha256_of_the_image_file) ... ok
+test_signed_manifest_produces_a_real_verifiable_signature (test_sign_manifest_tool.SignManifestToolTests.test_signed_manifest_produces_a_real_verifiable_signature) ... ok
+test_tampered_manifest_field_fails_verification (test_sign_manifest_tool.SignManifestToolTests.test_tampered_manifest_field_fails_verification) ... ok
+
+----------------------------------------------------------------------
+Ran 80 tests in 20.081s
+
+OK
+[ADMIN] no COVIO_ADMIN_PASSWORD set -- generated a random dev admin password for this process only (username 'admin'):
+[ADMIN]   kWff_zSkS0RFENS67OuEuBlD
+[ADMIN] set COVIO_ADMIN_PASSWORD to pin a stable value across restarts.
+Test private key written to: C:\Users\Dell\AppData\Local\Temp\tmp4hr70uba\test_key.pem
+This file is gitignored (server/tools/.test_signing_key.pem) -- it must NEVER be committed. Regenerate any time by deleting it and re-running --gen-test-key.
+
+Paste this PUBLIC key into ota_keys.h's COVIO_OTA_PUBLIC_KEY_PEM (TEST/non-production use only):
+
+-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEcviPnU7QMnQHcxjUS5M9a5qVifxo
+BsG4aViJq2VaE2oWrwZToqxqsImvuOocoAk1S1EAiAZhJI+FbDCaoU4ifg==
+-----END PUBLIC KEY-----
+
+Test private key written to: C:\Users\Dell\AppData\Local\Temp\tmpa91_7tnc\test_key.pem
+This file is gitignored (server/tools/.test_signing_key.pem) -- it must NEVER be committed. Regenerate any time by deleting it and re-running --gen-test-key.
+
+Paste this PUBLIC key into ota_keys.h's COVIO_OTA_PUBLIC_KEY_PEM (TEST/non-production use only):
+
+-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEeMoCzMz+Lh/lD5rFTNLADxGD9rRl
+BiXIK6+rBB4/dFLhaIax4worKW2of6I2xRocGFDUMlO3lXE0vmb6gPO2dg==
+-----END PUBLIC KEY-----
+
+Signed manifest written to C:\Users\Dell\AppData\Local\Temp\tmpa91_7tnc\manifest.json
+Test private key written to: C:\Users\Dell\AppData\Local\Temp\tmp38tsis8h\test_key.pem
+This file is gitignored (server/tools/.test_signing_key.pem) -- it must NEVER be committed. Regenerate any time by deleting it and re-running --gen-test-key.
+
+Paste this PUBLIC key into ota_keys.h's COVIO_OTA_PUBLIC_KEY_PEM (TEST/non-production use only):
+
+-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEyvYoYitl5c8+UqAFLXNHiRS4P3dx
+IrN99hpNjmGz3gfVxkL96+ONub3MzaMvn6doV/nw/KPc2l1jH6tcSF7Ghg==
+-----END PUBLIC KEY-----
+
+Signed manifest written to C:\Users\Dell\AppData\Local\Temp\tmp38tsis8h\manifest.json
+Test private key written to: C:\Users\Dell\AppData\Local\Temp\tmphkmz_k7f\test_key.pem
+This file is gitignored (server/tools/.test_signing_key.pem) -- it must NEVER be committed. Regenerate any time by deleting it and re-running --gen-test-key.
+
+Paste this PUBLIC key into ota_keys.h's COVIO_OTA_PUBLIC_KEY_PEM (TEST/non-production use only):
+
+-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEmDTFSzs1yKpjQ1Umha57HcoWhprK
+Ut2T3Nb1dYXtAp7nzESvNQXy4LWtB7GpW0MtiQSRkNNjjK3BwFTp0d8TPg==
+-----END PUBLIC KEY-----
+
+Signed manifest written to C:\Users\Dell\AppData\Local\Temp\tmphkmz_k7f\manifest.json
