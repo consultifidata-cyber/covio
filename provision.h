@@ -20,6 +20,8 @@
 // ============================================================================
 #pragma once
 #include <Arduino.h>
+#include "mbedtls/sha256.h"
+#include "credential_display.h"
 #include "store.h"
 #include "wifi_provision.h"
 
@@ -47,7 +49,7 @@ private:
       Serial.printf("fw        : %s\n", FW_VERSION);
       Serial.printf("boot_id   : %u\n", st_->bootId());
       Serial.printf("server_url: %s\n", st_->serverUrl().c_str());
-      Serial.printf("api_key   : %s\n", st_->apiKey().c_str());
+      Serial.printf("api_key   : %s\n", apiKeyDisplay_().c_str());
       Serial.printf("wifi_ssid : %s\n", st_->wifiSsid().c_str());
       Serial.printf("calib     : v%u  K=%.4f  density=%.3f  Tref=%.1f\n",
                     st_->cfgVer(), st_->kFactor(), st_->density(), st_->tRef());
@@ -81,6 +83,32 @@ private:
     } else {
       Serial.println("[PROV] unknown. type: help");
     }
+  }
+
+  // Plant-pilot activation remediation (credential-exposure closure):
+  // the raw api_key was previously printed verbatim by "show" -- readable
+  // by anyone with physical USB access, with no authentication at all
+  // (the enterprise re-audit's own finding). Reports only a status
+  // classification (same three-way logic as diagnostics.h's
+  // apiKeyStatus_(), duplicated here as a tiny private helper rather than
+  // pulling that header's much heavier include chain into this file just
+  // for one string) plus a short, IRREVERSIBLE SHA-256-derived
+  // fingerprint -- enough to confirm "did the key actually change"
+  // between two reads, never enough to reconstruct the original value.
+  // wifi_pass was never printed by this command in the first place (only
+  // wifi_ssid, which is not treated as a secret anywhere else in this
+  // codebase either) -- unchanged, not touched by this fix.
+  String apiKeyDisplay_() {
+    String key = st_->apiKey();
+    CredentialDisplayStatus st = classifyCredential(key.c_str(), DEFAULT_API_KEY);
+    String status = credentialDisplayStatusStr(st);
+
+    uint8_t hash[32];
+    mbedtls_sha256((const unsigned char*)key.c_str(), key.length(), hash, 0);
+    char fp[13];
+    snprintf(fp, sizeof(fp), "%02x%02x%02x%02x%02x%02x",
+             hash[0], hash[1], hash[2], hash[3], hash[4], hash[5]);
+    return status + " (fingerprint=" + String(fp) + ")";
   }
 
   Store* st_ = nullptr;
