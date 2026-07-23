@@ -31,6 +31,7 @@
 #include "queue.h"
 #include "telemetry.h"
 #include "certs.h"
+#include "timestamp_parse.h"   // overflow-safe int64 parsing (server_time_ms remediation)
 
 class Sync {
 public:
@@ -149,9 +150,22 @@ public:
     // documents). If this device has never successfully pushed yet,
     // haveServerTime() is false and ota.h treats manifest expiry as
     // unverifiable (fails closed -- see ota.h's own comment).
-    long serverTimeMs = extractLong_(resp, "server_time_ms");
-    if (serverTimeMs >= 0) {
-      serverUnixS_ = serverTimeMs / 1000;
+    // Remediation (34_OTA_SECURITY_HARDWARE_SUITE_RESULT.md): server_time_ms
+    // is a 13-digit Unix MILLISECOND timestamp -- extractLong_()'s 32-bit
+    // `long` accumulator overflows on any real-world value, permanently
+    // wrapping negative and failing closed on the OTA time-source gate.
+    // extractInt64_() below is overflow-CHECKED (see timestamp_parse.h),
+    // never silently wraps -- a value that would overflow int64_t is
+    // treated exactly like "field absent/malformed" (fails closed, same
+    // as before this fix), never accepted with a corrupted value.
+    int64_t serverTimeMs = 0;
+    if (extractInt64_(resp, "server_time_ms", &serverTimeMs) && serverTimeMs >= 0) {
+      // Stored as epoch SECONDS (unchanged field type/width -- a 32-bit
+      // signed `long` holds any epoch-seconds value until year 2038,
+      // comfortably outside this remediation's scope: only the
+      // MILLISECOND parsing step above overflowed, not this division's
+      // result).
+      serverUnixS_ = (long)(serverTimeMs / 1000);
       serverTimeCapturedAtMs_ = millis();
       haveServerTime_ = true;
     }
@@ -225,6 +239,30 @@ private:
     long v = 0; bool any = false;
     while (i < (int)s.length() && (isdigit(s[i]))) { v = v*10 + (s[i]-'0'); i++; any = true; }
     return any ? v : -1;
+  }
+  // Remediation for the OTA time-source overflow defect: same field-
+  // location logic as extractLong_() above (find "key", skip to the
+  // value, same first-match-wins policy for a duplicate key -- this
+  // parser has never attempted duplicate-key disambiguation, and this
+  // fix does not add that), but hands the located digit range to
+  // parseNonNegativeInt64Checked() (timestamp_parse.h) for the actual
+  // overflow-checked accumulation, instead of extractLong_()'s unchecked
+  // 32-bit `long` loop. Returns false (leaves *out untouched) for a
+  // missing field, malformed/non-digit content, an empty value, or a
+  // value that would overflow int64_t -- every one of those is a fail-
+  // closed rejection at the call site, identical in effect to
+  // extractLong_()'s existing "-1 = absent/malformed" contract.
+  static bool extractInt64_(const String& s, const char* key, int64_t* out) {
+    String pat = "\"" + String(key) + "\"";
+    int i = s.indexOf(pat);
+    if (i < 0) return false;
+    i = s.indexOf(':', i);
+    if (i < 0) return false;
+    i++;
+    while (i < (int)s.length() && (s[i] == ' ' || s[i] == '"')) i++;
+    int start = i;
+    while (i < (int)s.length() && isdigit(s[i])) i++;
+    return parseNonNegativeInt64Checked(s.c_str(), start, i, out);
   }
   static float extractFloat_(const String& s, const char* key) {
     String pat = "\"" + String(key) + "\"";

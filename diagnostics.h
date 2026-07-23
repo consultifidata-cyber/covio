@@ -218,6 +218,7 @@ private:
   static String resetReasonStr_() {
     switch (esp_reset_reason()) {
       case ESP_RST_POWERON:   return "power_on";
+      case ESP_RST_EXT:       return "external_pin";
       case ESP_RST_SW:        return "software";
       case ESP_RST_PANIC:     return "panic";
       case ESP_RST_INT_WDT:
