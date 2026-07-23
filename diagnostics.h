@@ -31,7 +31,7 @@ public:
   // GET /api/v1/info -- static identity, never changes without a reboot.
   static String buildInfoJson(Store& st) {
     String s;
-    s.reserve(192);
+    s.reserve(320);
     s  = "{\"hardware_id\":\"" + st.deviceId() + "\"";
     // DM-Phase 6 (§11.2/ADR-018): "" (store.h's unassigned sentinel) maps to
     // JSON null, exactly the frozen contract's "null until assigned at
@@ -44,6 +44,16 @@ public:
     s += ",\"model\":\"" DEVICE_MODEL "\"";
     s += ",\"boot_id\":" + String(st.bootId());
     s += ",\"schema_version_current\":" + String(SCHEMA_VERSION_CURRENT);
+    // Build-identity remediation: BUILD_COMMIT/BUILD_DIRTY/BUILD_TIME_UTC
+    // are compiler defines injected by scripts/generate_build_identity_extra.py
+    // at build time (config.h's own #ifndef fallbacks + #error guard cover
+    // the case where that script didn't run) -- never hand-maintained here.
+    s += ",\"build_commit\":\"" BUILD_COMMIT "\"";
+    s += ",\"build_dirty\":";
+    s += (BUILD_DIRTY ? "true" : "false");
+    s += ",\"build_time_utc\":\"" BUILD_TIME_UTC "\"";
+    s += ",\"security_version\":" + String(FW_SECURITY_VERSION);
+    s += ",\"accepted_security_floor\":" + String(st.securityVersion());
     s += "}";
     return s;
   }

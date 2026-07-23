@@ -51,6 +51,12 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.println("\n=== Covio Oil Flow Meter " FW_VERSION " ===");
+  // Build-identity remediation: recorded in boot diagnostics (this line),
+  // and separately exposed live via /api/v1/info (diagnostics.h) -- both
+  // read the SAME BUILD_COMMIT/BUILD_DIRTY/BUILD_TIME_UTC compiler defines,
+  // never a second hand-maintained copy.
+  Serial.printf("build_commit=%s  build_dirty=%d  build_time_utc=%s\n",
+                BUILD_COMMIT, BUILD_DIRTY, BUILD_TIME_UTC);
 
   // 1) config/identity first (also increments boot_id)
   store.begin();

@@ -198,3 +198,30 @@
 #ifndef FACTORY_TEST_BUILD
 #define FACTORY_TEST_BUILD 0
 #endif
+
+// ---- Build identity remediation ---------------------------------------------
+// BUILD_COMMIT/BUILD_DIRTY/BUILD_TIME_UTC are injected by
+// scripts/generate_build_identity_extra.py (a PlatformIO pre-build
+// extra_script, wired in via platformio.ini's shared [env] section) --
+// computed fresh from git at build time, never hand-maintained here. The
+// #ifndef fallbacks below exist ONLY as a defense-in-depth safety net (same
+// posture as RELEASE_BUILD/FACTORY_TEST_BUILD above): if the extra_script
+// somehow did not run, "unknown"/dirty=1 are themselves placeholder/unsafe
+// values, which the #error guard immediately below refuses to ship as a
+// release image, exactly like certs.h/ota_keys.h's existing placeholder
+// guards for CA cert / OTA public key.
+#ifndef BUILD_COMMIT
+#define BUILD_COMMIT "unknown"
+#endif
+#ifndef BUILD_DIRTY
+#define BUILD_DIRTY 1
+#endif
+#ifndef BUILD_TIME_UTC
+#define BUILD_TIME_UTC "unknown"
+#endif
+
+#if RELEASE_BUILD
+  #if BUILD_DIRTY
+    #error "RELEASE_BUILD=1 but BUILD_DIRTY=1 -- the build-identity extra_script did not run (or ran against a dirty/unresolvable tree). Refusing to build an unidentified/dirty release image (see scripts/build_identity.py)."
+  #endif
+#endif
