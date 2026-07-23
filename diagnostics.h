@@ -65,7 +65,7 @@ public:
     computeHealth_(q, sync, ota, sdPresent, healthState, alarmsJson);
 
     String s;
-    s.reserve(448);
+    s.reserve(1100);   // bumped for the ota_debug root-cause-audit object below
     s  = "{\"uptime_ms\":" + String(millis());
     s += ",\"wifi\":{\"connected\":";
     s += (sync.online() ? "true" : "false");
@@ -119,6 +119,35 @@ public:
     } else {
       s += ",\"last_auth_reject_reason\":null";
     }
+    // Root-cause audit instrumentation (35_OTA_TIME_SOURCE_REMEDIATION.../
+    // this remediation pass): raw ESP-IDF confirmation-lifecycle evidence.
+    // No secrets. Explicitly a temporary/removable diagnostic surface, not
+    // a frozen public contract like the fields above -- suitable for
+    // removal or reduction once the confirmation mechanism is certified.
+    s += ",\"ota_debug\":{";
+    s += "\"running_partition\":\"" + ota.runningPartitionLabel() + "\"";
+    s += ",\"running_partition_addr\":\"0x" + String(ota.runningPartitionAddr(), HEX) + "\"";
+    s += ",\"boot_partition\":\"" + ota.bootPartitionLabel() + "\"";
+    s += ",\"boot_partition_addr\":\"0x" + String(ota.bootPartitionAddr(), HEX) + "\"";
+    s += ",\"next_update_partition\":\"" + ota.nextUpdatePartitionLabel() + "\"";
+    s += ",\"raw_state_read_ok\":" + String(ota.haveRawState() ? "true" : "false");
+    s += ",\"raw_state_read_err\":" + String((int)ota.rawStateReadErr());
+    s += ",\"raw_state_read_err_name\":\"" + String(esp_err_to_name(ota.rawStateReadErr())) + "\"";
+    s += ",\"raw_img_state\":" + String(ota.rawImgState());
+    s += ",\"raw_img_state_name\":\"" + String(Ota::otaImgStateStr_((esp_ota_img_states_t)ota.rawImgState())) + "\"";
+    s += ",\"confirm_attempted\":" + String(ota.confirmAttempted() ? "true" : "false");
+    s += ",\"confirm_return_code\":" + String((int)ota.confirmReturnCode());
+    s += ",\"confirm_return_name\":\"" + String(esp_err_to_name(ota.confirmReturnCode())) + "\"";
+    s += ",\"floor_write_attempted\":" + String(ota.floorWriteAttempted() ? "true" : "false");
+    s += ",\"floor_write_ok\":" + String(ota.floorWriteOk() ? "true" : "false");
+    s += ",\"floor_read_after_write\":" + String(ota.floorReadAfterWrite());
+    // Root-cause remediation: explicit, never-misleading disclosure of
+    // whether BOOTLOADER-level rollback was actually armed/cancelled for
+    // this confirmation, vs. application-level health confirmation alone
+    // (see ota.h::confirmHealthyBoot()'s own comment for why these are
+    // now two independently-tracked things on this hardware).
+    s += ",\"bootloader_rollback_engaged\":" + String(ota.bootloaderRollbackEngaged() ? "true" : "false");
+    s += "}";
     s += "}";
     s += ",\"health_state\":\"" + healthState + "\"";
     s += "}";
@@ -148,7 +177,14 @@ public:
     s.reserve(384 + rssiHistoryCount * 8);
     s  = "{\"free_heap_bytes\":" + String(ESP.getFreeHeap());
     s += ",\"heap_low_water_mark_bytes\":" + String(esp_get_minimum_free_heap_size());
+    // Root-cause audit (Part 8, this remediation pass): the raw numeric
+    // esp_reset_reason() value is now ALWAYS included alongside the mapped
+    // string, and resetReasonStr_() itself embeds the raw number in its
+    // own "unknown(<n>)" fallback instead of a bare "unknown" -- so an
+    // unmapped/new enum value is never silently indistinguishable from
+    // any other unmapped value ever again.
     s += ",\"reset_reason\":\"" + resetReasonStr_() + "\"";
+    s += ",\"reset_reason_raw\":" + String((int)esp_reset_reason());
     s += ",\"cpu_freq_mhz\":" + String(ESP.getCpuFreqMHz());
     s += ",\"flash_size_bytes\":" + String(ESP.getFlashChipSize());
 
@@ -215,8 +251,19 @@ public:
   }
 
 private:
+  // Part 8 (this remediation pass): the prior ESP_RST_EXT-only guess did
+  // NOT resolve the "unknown" observation on real hardware (35_OTA_TIME_
+  // SOURCE_REMEDIATION..., §11) -- kept here because it is still a real,
+  // correctly-named ESP-IDF enum value worth mapping on its own merits,
+  // but the default branch below no longer hides an unmapped value behind
+  // a bare "unknown": it now embeds the raw numeric esp_reset_reason()
+  // value directly, so any future unmapped cause is immediately
+  // identifiable from a single /api/v1/metrics read (also see
+  // "reset_reason_raw", the same raw integer as its own dedicated field)
+  // -- no further firmware round-trip needed to even see the number.
   static String resetReasonStr_() {
-    switch (esp_reset_reason()) {
+    esp_reset_reason_t r = esp_reset_reason();
+    switch (r) {
       case ESP_RST_POWERON:   return "power_on";
       case ESP_RST_EXT:       return "external_pin";
       case ESP_RST_SW:        return "software";
@@ -226,7 +273,7 @@ private:
       case ESP_RST_WDT:       return "watchdog";
       case ESP_RST_BROWNOUT:  return "brownout";
       case ESP_RST_DEEPSLEEP: return "deepsleep";
-      default:                 return "unknown";
+      default:                 return "unknown(" + String((int)r) + ")";
     }
   }
 

@@ -134,39 +134,155 @@ public:
   // On boot, if the running image is pending verification, we are in the
   // trial window after an OTA. We defer marking it valid until the app has
   // demonstrably worked (see confirmHealthyBoot()).
+  //
+  // Root-cause audit instrumentation (35_OTA_TIME_SOURCE_REMEDIATION.../
+  // this remediation): captures the RAW esp_ota_get_state_partition()
+  // return code and image-state value, plus running/boot/next-update
+  // partition identity, so the confirmation lifecycle is directly
+  // observable instead of inferred from names. Never affects control
+  // flow -- pendingVerify_'s own condition is unchanged; these fields are
+  // read-only evidence, exposed via /api/v1/status's "ota_debug" object
+  // (diagnostics.h), explicitly labeled as removable after certification.
   void noteBoot() {
     const esp_partition_t* running = esp_ota_get_running_partition();
-    esp_ota_img_states_t state;
-    if (esp_ota_get_state_partition(running, &state) == ESP_OK) {
+    runningPartitionLabel_ = running ? String(running->label) : "?";
+    runningPartitionAddr_  = running ? running->address : 0;
+
+    const esp_partition_t* boot = esp_ota_get_boot_partition();
+    bootPartitionLabel_ = boot ? String(boot->label) : "?";
+    bootPartitionAddr_  = boot ? boot->address : 0;
+
+    const esp_partition_t* next = esp_ota_get_next_update_partition(nullptr);
+    nextUpdatePartitionLabel_ = next ? String(next->label) : "?";
+
+    esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+    esp_err_t rc = esp_ota_get_state_partition(running, &state);
+    stateReadErr_ = rc;
+    rawImgState_ = (int)state;
+    haveRawState_ = true;
+    if (rc == ESP_OK) {
       pendingVerify_ = (state == ESP_OTA_IMG_PENDING_VERIFY);
       if (pendingVerify_)
         Serial.println("[OTA] running a NEW image on trial — must confirm health");
+    }
+    Serial.printf("[OTA][DEBUG] noteBoot: running=%s@0x%06x boot=%s@0x%06x next=%s "
+                  "state_read_err=%d(%s) raw_state=%d(%s) pendingVerify=%d\n",
+                  runningPartitionLabel_.c_str(), (unsigned)runningPartitionAddr_,
+                  bootPartitionLabel_.c_str(), (unsigned)bootPartitionAddr_,
+                  nextUpdatePartitionLabel_.c_str(),
+                  (int)rc, esp_err_to_name(rc),
+                  (int)state, otaImgStateStr_(state), (int)pendingVerify_);
+  }
+
+  // ---- root-cause audit getters (read-only evidence, see noteBoot()'s comment) ----
+  const String& runningPartitionLabel() const { return runningPartitionLabel_; }
+  uint32_t      runningPartitionAddr()  const { return runningPartitionAddr_; }
+  const String& bootPartitionLabel()    const { return bootPartitionLabel_; }
+  uint32_t      bootPartitionAddr()     const { return bootPartitionAddr_; }
+  const String& nextUpdatePartitionLabel() const { return nextUpdatePartitionLabel_; }
+  bool          haveRawState()          const { return haveRawState_; }
+  esp_err_t     rawStateReadErr()       const { return stateReadErr_; }
+  int           rawImgState()           const { return rawImgState_; }
+  bool          confirmAttempted()      const { return confirmAttempted_; }
+  esp_err_t     confirmReturnCode()     const { return confirmReturnCode_; }
+  bool          floorWriteAttempted()   const { return floorWriteAttempted_; }
+  bool          floorWriteOk()          const { return floorWriteOk_; }
+  uint32_t      floorReadAfterWrite()   const { return floorReadAfterWrite_; }
+  bool          bootloaderRollbackEngaged() const { return bootloaderRollbackEngaged_; }
+
+  static const char* otaImgStateStr_(esp_ota_img_states_t s) {
+    switch (s) {
+      case ESP_OTA_IMG_NEW:             return "NEW";
+      case ESP_OTA_IMG_PENDING_VERIFY:  return "PENDING_VERIFY";
+      case ESP_OTA_IMG_VALID:           return "VALID";
+      case ESP_OTA_IMG_INVALID:         return "INVALID";
+      case ESP_OTA_IMG_ABORTED:         return "ABORTED";
+      case ESP_OTA_IMG_UNDEFINED:       return "UNDEFINED";
+      default:                          return "UNKNOWN_ENUM_VALUE";
     }
   }
 
   // Call once the device has proven itself healthy this boot
   // (WiFi connected AND at least one successful server ack or config fetch).
-  // This cancels the pending rollback and commits the new firmware.
+  //
+  // Root-cause remediation (35_OTA_TIME_SOURCE_REMEDIATION.../this pass) --
+  // PROVEN by raw hardware evidence, not inferred: esp_ota_get_state_partition()
+  // reports "VALID" (never "NEW"/"PENDING_VERIFY") immediately after a
+  // genuine, fresh OTA transition on this exact board/build, despite
+  // CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=1 being compiled into the app's
+  // own sdkconfig -- the BOOTLOADER is evidently not arming a rollback
+  // trial for these transitions. Since floor advancement was previously
+  // gated entirely behind `pendingVerify_` (only ever true when the
+  // bootloader DOES arm a trial), the accepted-security-floor could never
+  // advance on this hardware, for ANY successful build, OTA-installed or
+  // even a fresh USB-flashed baseline's very first boot -- not a symptom
+  // specific to OTA, a foundational gap in RISK-15's anti-downgrade floor
+  // ever initializing at all.
+  //
+  // Per this remediation's own explicit instruction ("do not fake
+  // bootloader confirmation... implement only the intended supported
+  // mechanism"): bootloader-level trial cancellation
+  // (esp_ota_mark_app_valid_cancel_rollback()) and APPLICATION-level
+  // health confirmation (this function's actual job: proving THIS
+  // build works, and advancing the floor accordingly) are now two
+  // separate steps. The bootloader call is attempted -- and its result
+  // checked, fail-closed -- ONLY when pendingVerify_ is genuinely true
+  // (nothing to cancel otherwise; avoids a false failure against an
+  // already-valid image, and stays idempotent). Floor advancement
+  // proceeds on genuine app-level health proof regardless of whether a
+  // bootloader trial was ever armed -- exactly what actually protects
+  // against a downgrade attack (the compiled FW_SECURITY_VERSION of a
+  // build that has PROVEN it can reach the server), decoupled from a
+  // bootloader mechanism proven not to engage on this hardware. Which
+  // path was taken is recorded (bootloaderRollbackEngaged_) and exposed
+  // via diagnostics so no report ever implies bootloader protection that
+  // was not actually active for a given confirmation.
   void confirmHealthyBoot() {
-    if (!pendingVerify_ || confirmed_) return;
-    esp_ota_mark_app_valid_cancel_rollback();
+    if (confirmed_) return;   // idempotent -- second call is always a safe no-op
+
+    if (pendingVerify_) {
+      confirmAttempted_ = true;
+      esp_err_t rc = esp_ota_mark_app_valid_cancel_rollback();
+      confirmReturnCode_ = rc;
+      if (rc != ESP_OK) {
+        Serial.printf("[OTA][DEBUG] esp_ota_mark_app_valid_cancel_rollback FAILED: "
+                      "%d(%s) -- a genuine bootloader trial existed and its "
+                      "cancellation failed; NOT marking confirmed, floor NOT advanced\n",
+                      (int)rc, esp_err_to_name(rc));
+        return;   // fail closed -- only when a real trial existed and failed to cancel
+      }
+    }
+
     confirmed_ = true;
-    Serial.println("[OTA] new image confirmed valid — rollback cancelled");
+    bootloaderRollbackEngaged_ = pendingVerify_;
+    Serial.printf("[OTA] application-level health confirmed (bootloader rollback %s)\n",
+                  pendingVerify_ ? "was engaged and cancelled" : "was NOT engaged for this boot");
 
     // RISK-15 remediation (OTA anti-downgrade): the accepted security-
     // version floor advances ONLY here -- once THIS running image has
-    // proven itself healthy, not at flash-write time and not merely on
-    // reboot. A candidate that never reaches this call (crashes, hangs,
-    // or is rolled back by the bootloader before ever proving healthy)
-    // never raises the floor -- "a failed candidate does not incorrectly
-    // lower [or raise] the accepted security floor" (mandate requirement).
-    // Monotonic: never LOWERS the floor even if this build's own
-    // FW_SECURITY_VERSION were somehow less than what's already stored
-    // (defensive; should not happen in normal operation, but a floor must
-    // never move backward for any reason).
+    // genuinely proven itself healthy (WiFi + a real server contact this
+    // boot, the caller's own gating), never at flash-write time and never
+    // merely on reboot. A build that never reaches this call (crashes,
+    // hangs, or -- on hardware where it genuinely IS armed -- is rolled
+    // back by the bootloader before ever proving healthy) never raises
+    // the floor. Monotonic: never LOWERS the floor even if this build's
+    // own FW_SECURITY_VERSION were somehow less than what's already
+    // stored (defensive; should not happen in normal operation, but a
+    // floor must never move backward for any reason).
     if (st_ && FW_SECURITY_VERSION > (long)st_->securityVersion()) {
-      st_->setSecurityVersion((uint32_t)FW_SECURITY_VERSION);
-      Serial.printf("[OTA] security-version floor advanced to %d\n", FW_SECURITY_VERSION);
+      floorWriteAttempted_ = true;
+      uint32_t newFloor = (uint32_t)FW_SECURITY_VERSION;
+      st_->setSecurityVersion(newFloor);
+      uint32_t readBack = st_->securityVersion();
+      floorReadAfterWrite_ = readBack;
+      floorWriteOk_ = (readBack == newFloor);
+      if (floorWriteOk_) {
+        Serial.printf("[OTA] security-version floor advanced to %u (read-after-write verified)\n",
+                      (unsigned)newFloor);
+      } else {
+        Serial.printf("[OTA][DEBUG] floor write MISMATCH: wrote %u, read back %u -- "
+                      "NVS write may have failed\n", (unsigned)newFloor, (unsigned)readBack);
+      }
     }
   }
 
@@ -528,4 +644,21 @@ private:
                                               // has been rejected yet this boot", not that
                                               // a candidate was accepted -- see poll()
   OtaAuthVerdict lastAuthReject_ = OTA_AUTH_OK;  // RISK-16: same "nothing rejected yet" meaning
+
+  // ---- root-cause audit instrumentation (this remediation) -- read-only
+  // evidence, never affects control flow, see noteBoot()'s own comment ----
+  String   runningPartitionLabel_ = "?";
+  uint32_t runningPartitionAddr_ = 0;
+  String   bootPartitionLabel_ = "?";
+  uint32_t bootPartitionAddr_ = 0;
+  String   nextUpdatePartitionLabel_ = "?";
+  bool     haveRawState_ = false;
+  esp_err_t stateReadErr_ = ESP_FAIL;
+  int      rawImgState_ = -1;
+  bool     confirmAttempted_ = false;
+  esp_err_t confirmReturnCode_ = ESP_FAIL;
+  bool     floorWriteAttempted_ = false;
+  bool     floorWriteOk_ = false;
+  uint32_t floorReadAfterWrite_ = 0;
+  bool     bootloaderRollbackEngaged_ = false;
 };
