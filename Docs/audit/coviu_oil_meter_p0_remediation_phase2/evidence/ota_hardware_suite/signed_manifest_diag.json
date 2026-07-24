@@ -1,0 +1,15 @@
+{
+  "version": "1.0.2-diag-candidate",
+  "url": "http://192.168.1.3:8000/firmware/covio-1.0.2-diag-candidate.bin",
+  "security_version": 2,
+  "hw_compat": "covio-oilflow-v1",
+  "schema_version": 1,
+  "image_size": 1025424,
+  "image_sha256": "2f5541b2eee70834988af58dbb9e5d82ae503bec4d4553d513a2e234a4752e3d",
+  "channel": "stable",
+  "issued_at": 1784827022,
+  "expires_at": 1787419022,
+  "manifest_id": "1.0.2-diag-candidate-1784827022",
+  "key_id": "covio-test-key-2026-07",
+  "signature": "MEQCIBqeBk56Kvf9KiU9msRqALfPNAPeHI+iJg0gekA5FXc7AiB521jq6/Ow6rOgPITulxWouPCucR04WLvJJCJ3N7++lw=="
+}

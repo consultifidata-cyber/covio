@@ -1,0 +1,15 @@
+{
+  "version": "1.0.2-badsig-test",
+  "url": "http://192.168.1.3:8000/firmware/covio-1.0.2-badsig-test.bin",
+  "security_version": 1,
+  "hw_compat": "covio-oilflow-v1",
+  "schema_version": 1,
+  "image_size": 1021712,
+  "image_sha256": "f8cb724e12074d4cae18c7f942ec859de90631de21dadeff367ee51117b339ac",
+  "channel": "stable",
+  "issued_at": 1784818168,
+  "expires_at": 1787410168,
+  "manifest_id": "1.0.2-badsig-test-1784818168",
+  "key_id": "covio-test-key-2026-07",
+  "signature": "MEUCIQDENfojuPdukBFidhu3oMIuB6WhLNt6YnF54A1GCB/xrAIgd431FXRealxe/kSqc1abMWZmARx2VnFh6K/4JDoeg+o="
+}

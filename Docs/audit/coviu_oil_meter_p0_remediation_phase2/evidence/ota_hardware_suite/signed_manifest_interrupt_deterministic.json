@@ -1,0 +1,15 @@
+{
+  "version": "1.0.5-interrupt-deterministic",
+  "url": "http://192.168.1.3:8001/firmware.bin",
+  "security_version": 2,
+  "hw_compat": "covio-oilflow-v1",
+  "schema_version": 1,
+  "image_size": 1021712,
+  "image_sha256": "f8cb724e12074d4cae18c7f942ec859de90631de21dadeff367ee51117b339ac",
+  "channel": "stable",
+  "issued_at": 1784830043,
+  "expires_at": 1787422043,
+  "manifest_id": "1.0.5-interrupt-deterministic-1784830043",
+  "key_id": "covio-test-key-2026-07",
+  "signature": "MEUCICEXFWG//vGhdNrbWhv1C/JThXso0wLzg1D4cHVqAGOEAiEAhRfinUWLUG/ZeSrzFl9H6o7ldwiJdD5RNdUNML0kh2c="
+}

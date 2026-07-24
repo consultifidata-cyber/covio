@@ -1,0 +1,15 @@
+{
+  "version": "1.0.3-floor-proof-candidate",
+  "url": "http://192.168.1.3:8000/firmware/covio-1.0.3-floor-proof-candidate.bin",
+  "security_version": 2,
+  "hw_compat": "covio-oilflow-v1",
+  "schema_version": 1,
+  "image_size": 1025808,
+  "image_sha256": "575e970f53eb67d47e516d1e16ea155ddf65858b4a1482729d7fdaa76c61b808",
+  "channel": "stable",
+  "issued_at": 1784827786,
+  "expires_at": 1787419786,
+  "manifest_id": "1.0.3-floor-proof-candidate-1784827786",
+  "key_id": "covio-test-key-2026-07",
+  "signature": "MEUCIDqtbFZbnS7Gqs3KGW0D1Xyve7HH6Z3SkPh2zmUUXnhgAiEAtwuDCgO+ukjMEOC0X6vFER5rXyODZATMkPT5v8iB1zo="
+}
