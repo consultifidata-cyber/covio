@@ -291,6 +291,47 @@ jobs:
             echo "::warning::No firmware.map produced by this build -- skipping (not every toolchain/framework combination emits one without an explicit linker flag; see Docs/FIRMWARE_BUILD.md). .bin and .elf are still uploaded."
           fi
 
+          # --- Full flashable set + single merged image (ADR-013 production
+          # onsite-flash deliverable). PlatformIO already produced the
+          # bootloader / partition-table / boot_app0 images alongside the
+          # app image; copy them verbatim and let esptool (bundled with the
+          # installed espressif32 platform's tool-esptoolpy) stitch a single
+          # offset-correct 0x0 image so an onsite engineer can flash the
+          # whole device in one command with no per-file offset arithmetic.
+          BUILD_DIR=".pio/build/release"
+          BOOT_SRC="$BUILD_DIR/bootloader.bin"
+          PART_SRC="$BUILD_DIR/partitions.bin"
+          # boot_app0 (the OTA-data init image at 0xe000) ships inside the
+          # framework package, not the build dir -- locate it under the
+          # PlatformIO core packages so the merged image's OTA-data region
+          # is initialised exactly as a first flash expects.
+          BOOTAPP0="$(find "$HOME/.platformio/packages" -name boot_app0.bin 2>/dev/null | head -1 || true)"
+          for f in "$BOOT_SRC" "$PART_SRC"; do
+            [ -f "$f" ] || { echo "::error::missing $f"; exit 1; }
+          done
+          cp "$BOOT_SRC" "artifacts/covio-bootloader-v${VERSION}.bin"
+          cp "$PART_SRC" "artifacts/covio-partitions-v${VERSION}.bin"
+          [ -n "$BOOTAPP0" ] && cp "$BOOTAPP0" "artifacts/covio-boot_app0-v${VERSION}.bin"
+
+          # ESP32-S3 flash offsets: bootloader 0x0, partitions 0x8000,
+          # boot_app0 0xe000, app 0x10000 (this project's default_16MB.csv
+          # single-factory-app layout). merge_bin bakes those offsets into
+          # one 0x0-based image; --flash_size 16MB matches board_upload.
+          ESPTOOL="$(find "$HOME/.platformio/packages" -name 'esptool.py' 2>/dev/null | head -1 || true)"
+          if [ -n "$ESPTOOL" ] && [ -n "$BOOTAPP0" ]; then
+            python "$ESPTOOL" --chip esp32s3 merge_bin \
+              -o "artifacts/covio-merged-flash-v${VERSION}.bin" \
+              --flash_mode dio --flash_freq 80m --flash_size 16MB \
+              0x0     "artifacts/covio-bootloader-v${VERSION}.bin" \
+              0x8000  "artifacts/covio-partitions-v${VERSION}.bin" \
+              0xe000  "artifacts/covio-boot_app0-v${VERSION}.bin" \
+              0x10000 "artifacts/covio-firmware-v${VERSION}.bin" \
+            && echo "merged image built" \
+            || echo "::warning::merge_bin failed -- individual images are still uploaded"
+          else
+            echo "::warning::esptool.py or boot_app0.bin not found -- merged image skipped; individual images are still uploaded and flashable per-offset."
+          fi
+
           # SHA256 checksum for every real artifact produced, matching
           # RE-6's own established afterAllArtifactBuild.js convention
           # exactly (same "<hash>  <filename>" format).
