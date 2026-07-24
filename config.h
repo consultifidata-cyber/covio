@@ -35,7 +35,7 @@
 // remains here ONLY so the bench stub (server/server.py, still plain HTTP)
 // keeps working with zero config changes -- a deliberate, permanent
 // bench/dev affordance, not a leftover TODO.
-#define DEFAULT_SERVER_URL    "http://192.168.1.3:8000"
+#define DEFAULT_SERVER_URL    "https://data.funtastik.co.in"
 #define DEFAULT_API_KEY       "dev-key-change-me"
 
 // ---- API paths (the shared contract; identical on LCS and cloud) ------------

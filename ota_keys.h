@@ -44,14 +44,14 @@
 #pragma once
 #include "config.h"
 
-#define COVIO_OTA_KEY_IS_PLACEHOLDER 1
+#define COVIO_OTA_KEY_IS_PLACEHOLDER 0
 
 // Key identifier -- allows a future signed manifest to name WHICH public
 // key it expects the device to verify against (supports key rotation:
 // multiple trusted keys could be compiled in, keyed by this same id scheme
 // -- see 21_SIGNING_KEY_MANAGEMENT_PLAN.md's rotation section for why only
 // ONE is implemented this pass, not a trust-list).
-#define COVIO_OTA_KEY_ID "covio-test-key-2026-07"
+#define COVIO_OTA_KEY_ID "covio-prod-erp-2026-07"
 
 // PLACEHOLDER TEST KEY -- see this file's header comment. Regenerate via:
 //   python server/tools/sign_manifest.py --gen-test-key
@@ -63,8 +63,8 @@
 // full anywhere in this repository or its documentation.
 static const char* COVIO_OTA_PUBLIC_KEY_PEM = R"PEMKEY(
 -----BEGIN PUBLIC KEY-----
-MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAElDhadjtlgLnDLPz2XkdjJa+GXPUs
-jngxaMpIaQspSdkFOaQ77/CBddLU/HNZPFeZpngRfFeMYnbWbUJImgM4Kw==
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE7ZBAvBUFPk3RHkxuruueklHr7yGk
+N4PmjI1ZpcfWt7lUd1udOsMBSsXN5rB6xiXY7/xc4c05vppYTISWdrWLEg==
 -----END PUBLIC KEY-----
 )PEMKEY";
 
