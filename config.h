@@ -15,7 +15,7 @@
 #pragma once
 
 // ---- Firmware identity (bump on every release; OTA compares against this) ---
-#define FW_VERSION            "1.0.0"
+#define FW_VERSION            "1.0.1"
 #define DEVICE_MODEL          "covio-oilflow-v1"
 
 // ---- RISK-15 remediation (OTA anti-downgrade) --------------------------------

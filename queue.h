@@ -228,6 +228,23 @@ public:
     // counter at its default 0, matching pendingCount()'s own doc comment.
 #ifndef NATIVE_TEST
     if (tot_) unackedCount_ = computeUnackedCount_();
+
+    // v1.0.1 flash-full recovery: a device that ran the pre-rollover
+    // firmware has one huge, fully-acknowledged segment file it can never
+    // free (see append()'s rollover comment) -- its flash is full and
+    // every append fails. All its rows are acked (server's cumulative
+    // floor reached the last written seq before the wedge), so if the
+    // queue is fully drained, deleting the segment files and resetting
+    // both checkpoints to (segment 0, offset 0) loses nothing:
+    // ack_.acked_seq is PRESERVED, seq numbering is global/monotonic
+    // (totalizer checkpoint, untouched), so post-reset rows keep dedup
+    // safety server-side. Files are removed FIRST, checkpoints persisted
+    // SECOND -- on a full filesystem the removes are what make the
+    // checkpoint writes possible at all; a crash in between leaves stale
+    // checkpoints pointing at a missing/short file, which append()'s
+    // existing clamp branch and pending()'s defensive clamp already
+    // self-heal.
+    if (tot_) reclaimDrainedQueue_();
 #endif
   }
 
@@ -255,6 +272,30 @@ public:
 
     uint32_t activeSeg  = tot_->queueOffsetSegment();
     uint32_t goodOffset = tot_->queueOffsetOffset();
+
+    // ---- segment rollover (v1.0.1 flash-full fix) ---------------------------
+    // QUEUE_SEGMENT_ROWS (config.h) existed since ADR-003 but was never
+    // consulted: every row landed in the checkpoint's segment (0 forever),
+    // one file grew ~36 B/s, and since ackThrough() only deletes segments
+    // STRICTLY BELOW the cursor's segment, not one byte was ever freed --
+    // the spiffs partition (3,538,944 B / 36 B = 98,304-row raw ceiling)
+    // filled at seq ~97.3k and every append failed from then on
+    // (QFAIL_WRITE_SHORT), silencing telemetry while config/OTA polls
+    // continued. Rolling to a new segment once the active one reaches its
+    // row cap is what finally lets ackThrough()'s existing per-segment
+    // deletion reclaim space in steady state (max ~2 live segments,
+    // ~360 KB). The rollover checkpoint is persisted BEFORE the first
+    // write to the new segment: a crash between the two leaves an
+    // active-segment file that simply doesn't exist yet, which
+    // appendOpenSize() (FILE_APPEND) creates empty on the next call --
+    // the same first-row path the original code already relied on.
+    if (goodOffset >= QUEUE_SEGMENT_ROWS * sizeof(QRow)) {
+      activeSeg += 1;
+      goodOffset = 0;
+      tot_->setQueueOffset(activeSeg, 0);
+      Serial.printf("[Q] segment rollover -> seg %u\n", (unsigned)activeSeg);
+    }
+
     String path = segmentPath_(activeSeg);
 
     // ---- determine actual on-disk size --------------------------------------
@@ -471,6 +512,16 @@ public:
     if (!tot_) { ackThroughLegacy_(ackedSeq, bootId); return; }
     if (ackedSeq <= ack_.acked_seq) return;
 
+    // v1.0.1: segments below the PRE-walk cursor were already deleted by
+    // earlier acks (or by begin()'s boot cleanup) -- the deletion loop at
+    // the bottom starts here instead of 0, keeping it O(segments consumed
+    // this ack) rather than O(all segments ever created), which matters
+    // once rollover (append()) makes segment ids actually advance. A
+    // crash between persistAck_() and the removes below can strand a
+    // below-cursor segment; begin()'s cleanupOrphanSegments_() now also
+    // removes those at next boot.
+    const uint32_t firstUndeletedSeg = ack_.cursor_segment;
+
     // ---- walk the cursor forward, mirroring pending()'s own segment-
     // boundary rules exactly, so the read path and the ack path never
     // disagree about what counts as "read" vs "acknowledged." -------------
@@ -549,7 +600,7 @@ public:
     // NEVER deleted before its corresponding cursor advance is durable.
     persistAck_();
 
-    for (uint32_t s = 0; s < seg; s++) {
+    for (uint32_t s = firstUndeletedSeg; s < seg; s++) {
       LittleFS.remove(segmentPath_(s));   // range is always < seg <= activeSeg --
                                      // the active segment is never deleted
     }
@@ -750,6 +801,56 @@ private:
     }
     return count;
   }
+
+  // v1.0.1 flash-full recovery -- see the call site in begin() for the full
+  // rationale. Only ever called at boot, only when the queue is fully
+  // drained (unackedCount_ == 0 from the ground-truth scan above), and a
+  // no-op on an already-fresh queue.
+  void reclaimDrainedQueue_() {
+    if (unackedCount_ != 0) return;
+    uint32_t activeSeg = tot_->queueOffsetSegment();
+    uint32_t off = tot_->queueOffsetOffset();
+    if (activeSeg == 0 && off == 0 &&
+        ack_.cursor_segment == 0 && ack_.cursor_offset == 0) return;  // nothing to reclaim
+
+    // Remove every seg_*.bin in the queue dir (two-pass, same directory-
+    // mutation-safety pattern as cleanupOrphanSegments_). All rows are
+    // acked, so every segment file -- including the active one -- is dead
+    // weight.
+    uint32_t ids[MAX_ORPHAN_CANDIDATES];
+    int idCount = 0;
+    bool more = true;
+    while (more) {
+      more = false;
+      idCount = 0;
+      File dir = LittleFS.open(SD_QUEUE_DIR);
+      if (!dir || !dir.isDirectory()) { if (dir) dir.close(); break; }
+      File f = dir.openNextFile();
+      while (f) {
+        bool isDir = f.isDirectory();
+        String name = String(f.name());
+        f.close();
+        if (!isDir) {
+          uint32_t id;
+          if (parseSegmentId_(name, id)) {
+            if (idCount < MAX_ORPHAN_CANDIDATES) ids[idCount++] = id;
+            else more = true;   // directory bigger than one batch -- loop again
+          }
+        }
+        f = dir.openNextFile();
+      }
+      dir.close();
+      for (int i = 0; i < idCount; i++) LittleFS.remove(segmentPath_(ids[i]));
+      if (idCount == 0) break;   // defensive: nothing matched, don't spin
+    }
+
+    tot_->setQueueOffset(0, 0);
+    ack_.cursor_segment = 0;
+    ack_.cursor_offset  = 0;
+    persistAck_();
+    Serial.printf("[Q] drained queue reclaimed -- storage reset to segment 0 "
+                  "(acked_seq=%u preserved)\n", (unsigned)ack_.acked_seq);
+  }
 #endif  // NATIVE_TEST -- see the matching #ifndef above maybeCompact_()
 
   AckRec ack_{};
@@ -832,7 +933,13 @@ private:
       f.close();
       if (!isDir) {
         uint32_t id;
-        if (parseSegmentId_(name, id) && id > activeSeg) {
+        // v1.0.1: also remove segments strictly BELOW the ack cursor's
+        // segment -- fully-consumed segments a crash between ackThrough()'s
+        // persistAck_() and its deletion loop left behind (that loop now
+        // starts at the pre-walk cursor rather than 0, so boot is the only
+        // place these strays are ever swept). ack_ is already recovered by
+        // the time begin() calls this (see call order there).
+        if (parseSegmentId_(name, id) && (id > activeSeg || id < ack_.cursor_segment)) {
           if (orphanCount < MAX_ORPHAN_CANDIDATES) {
             orphanIds[orphanCount++] = id;
           } else {
