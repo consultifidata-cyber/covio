@@ -165,6 +165,23 @@ private:
         q_->recoverQueueStorage();
         Serial.println("[PROV] queue storage recovered: seg_000000.bin removed, write cursor reset to 0/0.");
       }
+#if WDT_TEST_BUILD
+    } else if (line == "test_hang") {
+      // Phase-2 watchdog failure-injection (validation matrix E2). Compiled
+      // ONLY when -DWDT_TEST_BUILD=1 is explicitly passed -- absent from
+      // every normal env (bench, release, mikiwire), same compile-time-
+      // absence posture as FACTORY_TEST_BUILD's factory route. Simulates a
+      // genuine main-loop hang: an infinite busy loop that never returns to
+      // loop() and never feeds the task watchdog. Expected outcome on
+      // hardware: task-WDT panic reset within WATCHDOG_TIMEOUT_S, reset
+      // reason classified as watchdog by the existing boot code (wdt_cnt
+      // increments, crash streak increments), then a normal recovered boot.
+      Serial.printf("[WDT-TEST] simulating firmware hang NOW -- expect a "
+                    "watchdog reset within %ds...\n", WATCHDOG_TIMEOUT_S);
+      Serial.flush();
+      volatile uint32_t sink = 0;
+      while (true) { sink++; }   // no feed, no yield-back to loop()
+#endif
     } else {
       Serial.println("[PROV] unknown. type: help");
     }

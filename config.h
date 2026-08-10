@@ -392,6 +392,15 @@
 #ifndef MIKI_WIRE_PROFILE
 #define MIKI_WIRE_PROFILE 0
 #endif
+
+// Phase-2 watchdog failure-injection build (validation matrix E2): compiles
+// the serial console's `test_hang` command (provision.h), which simulates a
+// genuine main-loop hang so the task watchdog's detect->reset->classify->
+// recover chain can be demonstrated on real hardware. NEVER set in any
+// shipping env -- bench-only, passed explicitly as -DWDT_TEST_BUILD=1.
+#ifndef WDT_TEST_BUILD
+#define WDT_TEST_BUILD 0
+#endif
 #if MIKI_WIRE_PROFILE
 #define MIKI_MAX_PULSE_HZ_DEFAULT    0UL          // 0 = monitor inert
 #define MIKI_MAX_PULSE_HZ_LIMIT      2000UL
