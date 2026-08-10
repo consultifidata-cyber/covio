@@ -46,6 +46,47 @@ ESP32-S3-POE-ETH-8DI-8DO unit (NOT MW-001, NOT the Balaji unit) into USB.
 
 ---
 
+## Session 3 — 2026-08-10 ~22:55 (Phase-4B: network-only discovery, read-only)
+
+Premise: bench ESP32 reported powered but deliberately NOT USB-connected.
+Goal: determine LAN reachability without touching the device. WiFi password
+handled as a secret (never echoed anywhere, including this log).
+
+PC network: connected to `Airtel_amar_3999`, IP 192.168.1.3/24, GW
+192.168.1.1 — **this PC is the firmware's compiled-in bench default server
+target** (`DEFAULT_SERVER_URL=http://192.168.1.3:8000`).
+
+Evidence collected (all read-only, no device modified):
+1. ICMP sweep of 192.168.1.0/24 + ARP: only the gateway present. No
+   Espressif-OUI MAC on the LAN (in particular neither production MAC
+   F8:4A:D1:A1:72:E0 nor F4:E5:B2:85:84:28 — good).
+2. WiFi beacon scan: only `Airtel_amar_3999` visible. **No
+   `Covio-Setup-*` provisioning AP** in range.
+3. mDNS/DNS-SD browse 12 s (`_covio._tcp`, `_http._tcp`, `_arduino._tcp`):
+   nothing.
+4. Passive 60 s listener on this PC's :8000 (the default push target): zero
+   connections — no default-provisioned covio device is pushing on this LAN.
+
+Firmware capability check (source, read-only): LAN access IS supported by
+current firmware when STA-connected (mDNS `_covio._tcp`, hostname
+`covio-<last6>`, unauthenticated read-only HTTP :80) and AP-fallback captive
+portal exists on boot-time STA failure — so the negative result is about the
+DEVICE's state/location, not missing firmware capability.
+
+Verdict: **NO ESP32 FOUND · LAN ACCESS NOT AVAILABLE.** The powered unit is
+not on this LAN and not beaconing its AP within this PC's radio range.
+Consistent scenarios (cannot distinguish remotely, per mandate not guessed):
+connected to a different SSID; running pre-AP-fallback firmware stuck
+retrying STA; powered outside radio range; WiFi subsystem inactive.
+Changes made: firmware 0, config 0, NVS 0, OTA 0.
+
+Fastest resolutions: (a) plug the unit into this PC over USB (also required
+eventually — flashing the candidate is USB-only), or (b) power-cycle it
+within range of this PC and watch for `Covio-Setup-*` within ~20 s of boot,
+which simultaneously proves it runs AP-fallback-capable firmware.
+
+---
+
 ## Required physical hardware (blocking everything below A-row procedures)
 
 1. **Waveshare ESP32-S3-POE-ETH-8DI-8DO** bench unit (NOT the MW-001
