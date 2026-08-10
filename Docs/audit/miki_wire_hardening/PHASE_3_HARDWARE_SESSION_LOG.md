@@ -24,6 +24,28 @@ clean tree. Status unchanged:
 
 ---
 
+## Session 2 — 2026-08-10 22:46 (Phase-4 first action, unattended agent session)
+
+**Hardware detection result: NO DEVICE CURRENTLY CONNECTED.**
+
+- Live COM enumeration: empty. PnP Ports class (Status OK): only LPT1.
+- Unfiltered PnP scan (all statuses) shows **historical, currently-absent**
+  device records — evidence that ESP32 hardware has been attached to this
+  PC before and the drivers are already installed:
+  - `USB\VID_303A&PID_1001` (Espressif ESP32-S3 native USB-serial/JTAG),
+    two distinct units historically on COM6 and COM7
+  - `USB\VID_10C4&PID_EA60` (CP210x bridge), historically COM3/COM4
+  - `USB\VID_1A86&PID_7523` (CH340), historically COM5
+  All listed Status "Unknown" = not present at scan time.
+
+**Consequence (Phase-4 §1):** STOP. No flash, no simulation, no firmware
+change, no status upgrade. Candidate remains frozen at `9379770`
+(firmware source `41e31af`). Every hardware row remains **BLOCKED**.
+The single missing dependency is unchanged: plug a dedicated bench
+ESP32-S3-POE-ETH-8DI-8DO unit (NOT MW-001, NOT the Balaji unit) into USB.
+
+---
+
 ## Required physical hardware (blocking everything below A-row procedures)
 
 1. **Waveshare ESP32-S3-POE-ETH-8DI-8DO** bench unit (NOT the MW-001
