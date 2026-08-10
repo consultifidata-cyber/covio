@@ -366,3 +366,36 @@
 #ifndef WATCHDOG_TIMEOUT_S
 #define WATCHDOG_TIMEOUT_S  60
 #endif
+
+// ---- Miki Wire profile (compile-time plant hardening layer) -----------------
+// Selects the Miki Wire proximity-hardening modules (pulse_plausibility.h,
+// sensor_health.h + their NVS tunables and console commands) at COMPILE
+// TIME -- #ifndef + build-flag override, the exact pattern BOARD_MODE/
+// SENSOR_MODE/RELEASE_BUILD above use (-DMIKI_WIRE_PROFILE=1 in the
+// mikiwire PlatformIO envs). The flag-less build -- the deployed Balaji
+// baseline -- contains NONE of this code (compile-time absence, the same
+// posture SENSOR_MODE_CT and FACTORY_TEST_BUILD already established), and
+// test_board_config.cpp's default compile enforces that with an #error.
+//
+// TUNABLE DEFAULTS ARE DELIBERATELY 0 = FEATURE INERT. The real ceilings
+// for Wire Drawing Machine 1 (max line speed -> max plausible pulse Hz;
+// longest legitimate idle gap) are INSUFFICIENT VERIFIED INFORMATION at
+// implementation time -- the monitors ship compiled-in but dormant, and are
+// armed per-site over the serial console (`set maxhz` / `set suspects`)
+// once real line parameters are confirmed. Bounds below are validation
+// limits for those commands, not operating guesses:
+//   - MIKI_MAX_PULSE_HZ_LIMIT 2000: an LJ12A3-4-Z/BX tops out around
+//     500 Hz switching; 2 kHz is an absolute electrical ceiling with
+//     margin, above which a configured value is certainly a typo.
+//   - suspect gap 60 s .. 7 days: below a minute would alarm on ordinary
+//     pauses; above a week the feature is indistinguishable from off.
+#ifndef MIKI_WIRE_PROFILE
+#define MIKI_WIRE_PROFILE 0
+#endif
+#if MIKI_WIRE_PROFILE
+#define MIKI_MAX_PULSE_HZ_DEFAULT    0UL          // 0 = monitor inert
+#define MIKI_MAX_PULSE_HZ_LIMIT      2000UL
+#define MIKI_SUSPECT_GAP_S_DEFAULT   0UL          // 0 = SUSPECT disabled
+#define MIKI_SUSPECT_GAP_S_MIN       60UL
+#define MIKI_SUSPECT_GAP_S_MAX       (7UL * 24UL * 3600UL)
+#endif

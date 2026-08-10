@@ -116,6 +116,29 @@ public:
     p_.putFloat("kfactor", k); p_.putFloat("density", d); p_.putFloat("tref", tr);
   }
 
+#if MIKI_WIRE_PROFILE
+  // ---- Miki Wire profile tunables (validated NVS config) -------------------
+  // Unlike the pure accessors above, these setters VALIDATE -- they are the
+  // write path for safety-relevant monitor thresholds typed over an
+  // unauthenticated serial console, so an out-of-bounds value is refused
+  // (returns false) rather than stored. Reads fall back to the compiled
+  // defaults (0 = feature inert) on absent/corrupt keys, so bad NVS can
+  // never prevent boot or invent a threshold. Compile-time absent from the
+  // Balaji flag-less build, like everything MIKI_WIRE_PROFILE.
+  uint32_t mikiMaxPulseHz() { return p_.getULong("mw_max_hz", MIKI_MAX_PULSE_HZ_DEFAULT); }
+  bool setMikiMaxPulseHz(uint32_t v) {
+    if (v > MIKI_MAX_PULSE_HZ_LIMIT) return false;          // 0 (= off) is always valid
+    p_.putULong("mw_max_hz", v);
+    return true;
+  }
+  uint32_t mikiSuspectGapS() { return p_.getULong("mw_suspect_s", MIKI_SUSPECT_GAP_S_DEFAULT); }
+  bool setMikiSuspectGapS(uint32_t v) {
+    if (v != 0 && (v < MIKI_SUSPECT_GAP_S_MIN || v > MIKI_SUSPECT_GAP_S_MAX)) return false;
+    p_.putULong("mw_suspect_s", v);
+    return true;
+  }
+#endif
+
   // ---- Balaji V1 freeze remediation (Product Readiness Review P1-1): -----
   // persistent, NVS-backed diagnostic counters. Lifetime counts since last
   // factory reset (same lifecycle as boot_id/restart_cnt above -- all live

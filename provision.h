@@ -64,6 +64,10 @@ private:
     line.trim();
     if (line == "help") {
       Serial.println("cmds: show | set url <u> | set key <k> | set wifi <ssid> <pass> | reboot | factory | provision | reset_ack | recover_queue");
+#if MIKI_WIRE_PROFILE
+      Serial.println("miki: set maxhz <0..2000> (pulse plausibility ceiling, 0=off) | "
+                     "set suspects <0|60..604800> (longest plausible idle, seconds, 0=off)");
+#endif
     } else if (line == "show") {
       Serial.printf("device_id : %s\n", st_->deviceId().c_str());
       Serial.printf("fw        : %s\n", FW_VERSION);
@@ -82,6 +86,13 @@ private:
                     "wifi_reconnects=%u push_fails=%u crash_streak=%u\n",
                     st_->restartCount(), st_->watchdogResetCount(), st_->brownoutResetCount(),
                     st_->wifiReconnectCount(), st_->pushFailCount(), st_->crashResetStreak());
+#if MIKI_WIRE_PROFILE
+      // Miki Wire profile tunables -- 0 means the corresponding monitor is
+      // present but inert (the shipped default until real site line
+      // parameters are confirmed; see config.h).
+      Serial.printf("miki      : maxhz=%u suspect_gap_s=%u\n",
+                    (unsigned)st_->mikiMaxPulseHz(), (unsigned)st_->mikiSuspectGapS());
+#endif
     } else if (line.startsWith("set url ")) {
       st_->setServerUrl(line.substring(8));
       Serial.println("[PROV] server_url saved. 'reboot' to apply cleanly.");
@@ -95,6 +106,26 @@ private:
         st_->setWifi(rest.substring(0, sp), rest.substring(sp + 1));
         Serial.println("[PROV] wifi saved. 'reboot' to apply.");
       } else Serial.println("[PROV] usage: set wifi <ssid> <pass>");
+#if MIKI_WIRE_PROFILE
+    } else if (line.startsWith("set maxhz ")) {
+      // Validated write (store.h refuses out-of-bounds). Applied live via
+      // covio_firmware.ino's monitor objects on the next telemetry cycle --
+      // no reboot needed; the value also persists across reboots.
+      uint32_t v = (uint32_t)line.substring(10).toInt();
+      if (st_->setMikiMaxPulseHz(v)) {
+        Serial.printf("[PROV] miki maxhz=%u saved (0=monitor off). Applies within 1s.\n", (unsigned)v);
+      } else {
+        Serial.printf("[PROV] REFUSED: maxhz must be 0..%u\n", (unsigned)MIKI_MAX_PULSE_HZ_LIMIT);
+      }
+    } else if (line.startsWith("set suspects ")) {
+      uint32_t v = (uint32_t)line.substring(13).toInt();
+      if (st_->setMikiSuspectGapS(v)) {
+        Serial.printf("[PROV] miki suspect_gap_s=%u saved (0=off). Applies within 1s.\n", (unsigned)v);
+      } else {
+        Serial.printf("[PROV] REFUSED: suspects must be 0 or %u..%u seconds\n",
+                      (unsigned)MIKI_SUSPECT_GAP_S_MIN, (unsigned)MIKI_SUSPECT_GAP_S_MAX);
+      }
+#endif
     } else if (line == "reboot") {
       Serial.println("[PROV] rebooting..."); delay(200); ESP.restart();
     } else if (line == "factory") {

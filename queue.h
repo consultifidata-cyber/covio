@@ -144,6 +144,13 @@ struct __attribute__((packed)) QRow {
 #define QUALITY_OK            0x0000
 #define QUALITY_BACKLOG_HIGH  0x0001   // queue exceeded highwater
 #define QUALITY_TIME_UNSYNCED 0x0002   // no wall-clock yet
+// Miki Wire hardening: advisory bits stamped by the MIKI_WIRE_PROFILE
+// monitors (covio_firmware.ino). Additive bitfield VALUES within the
+// existing uint16 quality field -- the QRow layout, schema_version, and
+// wire contract are unchanged (ADR-001: layout frozen; bit semantics are
+// data). A build without the profile never sets them.
+#define QUALITY_SUSPECT_RATE    0x0004   // pulse rate exceeded configured plausibility ceiling
+#define QUALITY_SENSOR_SUSPECT  0x0008   // no pulses beyond configured longest-plausible-idle
 
 struct __attribute__((packed)) AckRec {
   uint32_t magic;

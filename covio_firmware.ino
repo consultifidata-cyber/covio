@@ -41,6 +41,10 @@
 #if SENSOR_MODE == SENSOR_MODE_CT
 #include "sensor_ct.h"     // CT-clamp acquisition -- compiled ONLY into CT builds
 #endif
+#if MIKI_WIRE_PROFILE
+#include "pulse_plausibility.h"  // Miki Wire hardening (F5) -- Miki builds only
+#include "sensor_health.h"       // Miki Wire hardening (F6) -- Miki builds only
+#endif
 
 Store         store;
 Totalizer     totalizer;
@@ -53,6 +57,14 @@ WifiProvision wifiProvision;    // DM-Phase 2: SoftAP + captive-portal provision
 // Balaji V1 freeze remediation (Product Readiness Review P1-2): heuristic
 // sensor-stuck-at-zero detector, see sensor_stuck.h.
 SensorStuckDetector sensorStuck(SENSOR_STUCK_THRESHOLD_MS);
+#if MIKI_WIRE_PROFILE
+// Miki Wire hardening (F5/F6): both constructed inert (0 = disabled) and
+// armed from validated NVS tunables in setup() -- INSUFFICIENT VERIFIED
+// INFORMATION for real thresholds until site line parameters are confirmed
+// (see config.h). Advisory-only by design: neither ever gates counting.
+PulsePlausibilityMonitor pulsePlausibility(0);
+SensorHealthMonitor      sensorHealth(0);
+#endif
 #if SENSOR_MODE == SENSOR_MODE_CT
 // CT-clamp enhancement: converts debounced current-presence (DI2) into the
 // same raw-pulse stream the NPN/PCNT path produces. See sensor_ct.h.
@@ -104,6 +116,14 @@ void setup() {
   Serial.printf("device_id=%s  boot_id=%u\n",
                 store.deviceId().c_str(), store.bootId());
   Serial.println("(serial console ready — type 'help')");
+
+#if MIKI_WIRE_PROFILE
+  // Arm the Miki monitors from their validated NVS tunables (0 = inert).
+  pulsePlausibility.setMaxHz(store.mikiMaxPulseHz());
+  sensorHealth.setSuspectThresholdMs(store.mikiSuspectGapS() * 1000UL);
+  Serial.printf("[MIKI] profile active: maxhz=%u suspect_gap_s=%u (0=off)\n",
+                (unsigned)store.mikiMaxPulseHz(), (unsigned)store.mikiSuspectGapS());
+#endif
 
   // Balaji V1 freeze remediation (Product Readiness Review P1-1): classify
   // THIS boot's cause exactly once, via the same esp_reset_reason() call
@@ -337,6 +357,16 @@ void loop() {
     // storage pressure is finally visible remotely, not just on the LAN API.
     QRow row = Telemetry::build(store, total, seq, now / 1000,
                                 eventQueue.pendingCount() > QUEUE_HIGHWATER);
+#if MIKI_WIRE_PROFILE
+    // Miki Wire hardening (F5/F6): stamp advisory quality bits BEFORE the
+    // durable append (append() computes the row CRC over the final bytes).
+    // Live-reload of console-changed tunables is one cheap NVS read per
+    // second, matching how cfgVer is already polled elsewhere.
+    pulsePlausibility.setMaxHz(store.mikiMaxPulseHz());
+    sensorHealth.setSuspectThresholdMs(store.mikiSuspectGapS() * 1000UL);
+    if (pulsePlausibility.update(total, now))                    row.quality |= QUALITY_SUSPECT_RATE;
+    if (sensorHealth.update(total, now) == SENSOR_HEALTH_SUSPECT) row.quality |= QUALITY_SENSOR_SUSPECT;
+#endif
     eventQueue.append(row);                      // 1) durable row FIRST
     totalizer.service(seq);                 // 2) THEN checkpoint total+seq
     // ORDER MATTERS: if power dies between 1 and 2, this seq regenerates on

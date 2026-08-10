@@ -40,6 +40,17 @@ static_assert(BOARD_MODE == EXPECT_BOARD,
 static_assert(SENSOR_MODE == EXPECT_SENSOR,
               "SENSOR_MODE did not resolve to what this compile's flags expect");
 
+// Miki Wire hardening: the plant-profile layer must be compile-time ABSENT
+// from a flag-less build (the deployed Balaji baseline). EXPECT_MIKI states
+// what the harness passed, mirroring EXPECT_BOARD/EXPECT_SENSOR above; the
+// default expectation is OFF.
+#ifndef EXPECT_MIKI
+#define EXPECT_MIKI 0
+#endif
+static_assert(MIKI_WIRE_PROFILE == EXPECT_MIKI,
+              "BALAJI PROTECTION: MIKI_WIRE_PROFILE must be OFF in a flag-less build "
+              "(and ON only when -DMIKI_WIRE_PROFILE=1 was explicitly passed)");
+
 #if BOARD_MODE == BOARD_RELAY1CH
 // The DEPLOYED production plant's table (HEAD e5a593b) -- frozen.
 static_assert(PIN_PULSE == 1,
