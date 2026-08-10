@@ -305,6 +305,15 @@ public:
   void poll(bool online, Sync& sync) {
     if (!online) return;
 
+    // Miki Wire hardening (Phase-0 finding F7, OTA half): a persistently
+    // failing download/verify cycle previously re-erased and re-downloaded
+    // the inactive partition every OTA_POLL_MS (5 min) forever -- flash wear
+    // plus bandwidth for zero progress. After a failed attempt the next one
+    // waits out an exponential window: 10min doubling to a 1h cap. Cleared
+    // by any attempt that does not end in failure. Manifest 404s ("no
+    // update", the designed-safe outcome) never enter this path.
+    if (otaBackoffMs_ && (millis() - lastOtaFailMs_) < otaBackoffMs_) return;
+
     String url = st_->serverUrl() + PATH_OTA_MANIFEST;
 
     // DM-Phase 5 (ADR-005): same scheme dispatch as sync.h's pushOnce()/pollConfig().
@@ -420,6 +429,19 @@ public:
     Serial.printf("[OTA] update offered: %s (running %s) -- authenticity verified\n",
                   ver.c_str(), FW_VERSION);
     doVerifiedUpdate_(bin, (size_t)imageSize, imageSha256);
+    // F7 (OTA half): a successful update never returns here (ESP.restart);
+    // reaching this line means the attempt failed -- widen the retry window.
+    // doVerifiedUpdate_ clears failed_ at entry, so this reflects THIS attempt.
+    if (failed_) {
+      lastOtaFailMs_ = millis();
+      otaBackoffMs_ = otaBackoffMs_
+                        ? min<uint32_t>(otaBackoffMs_ * 2, 3600000UL)
+                        : (uint32_t)(2 * OTA_POLL_MS);
+      Serial.printf("[OTA] download/verify failed -- next attempt in >= %us\n",
+                    (unsigned)(otaBackoffMs_ / 1000));
+    } else {
+      otaBackoffMs_ = 0;
+    }
   }
 
   // DM-Phase 1 diagnostics: getter only, so /api/v1/status can report WHY
@@ -653,6 +675,8 @@ private:
 
   Store* st_ = nullptr;
   void (*serviceCb_)() = nullptr;   // Miki Wire hardening (F2/F3): see doVerifiedUpdate_
+  uint32_t otaBackoffMs_ = 0;       // F7 (OTA half): 0 = no backoff active
+  uint32_t lastOtaFailMs_ = 0;
   bool pendingVerify_ = false;
   bool confirmed_ = false;
   bool failed_ = false;   // DM-Phase 1: outcome of the most recent update attempt

@@ -101,6 +101,14 @@ public:
   // Returns true if at least one record was acked this call.
   bool pushOnce() {
     if (!online()) return false;
+    // Miki Wire hardening (Phase-0 finding F7): exponential backoff after
+    // failed pushes. Previously a dead/erroring server was retried every
+    // PUSH_PERIOD_MS forever (~12 blocking 8s-timeout attempts per minute,
+    // indefinitely). Doubles 10s -> 120s cap (+jitter), mirroring the WiFi
+    // reconnect policy above; any successful ack resets it. Queue integrity
+    // is untouched -- rows simply wait out the backoff window. Wrap-safe
+    // unsigned math, same idiom as every other timer here.
+    if (pushBackoffMs_ && (millis() - lastPushFailMs_) < pushBackoffMs_) return false;
     QRow batch[PUSH_BATCH_MAX];
     int n = q_->pending(batch, PUSH_BATCH_MAX);
     if (n == 0) return false;
@@ -141,6 +149,7 @@ public:
       // than a fabricated DNS-vs-TLS split) as well as server-side error
       // codes (4xx/5xx).
       st_->incrementPushFailCount();
+      notePushFailureBackoff_();          // F7: widen the retry window
       return false;                       // NOT an ack; retry later
     }
     String resp = http.getString();
@@ -151,8 +160,10 @@ public:
     if (ackSeq < 0) {
       Serial.println("[SYNC] 200 but no ack_seq — keeping queue");
       st_->incrementPushFailCount();      // same counter -- this is still not an ack
+      notePushFailureBackoff_();          // F7: widen the retry window
       return false;                       // bare 200 is not an ack (Invariant 6)
     }
+    pushBackoffMs_ = 0;                   // F7: genuine ack -- reset backoff
     // Miki Wire hardening (Phase-0 finding F8): never trust a server ack
     // beyond the highest seq this batch actually transmitted -- see
     // ack_validation.h for the full rationale. batch[] is FIFO by append
@@ -301,10 +312,21 @@ private:
     return s.substring(i+1).toFloat();
   }
 
+  // Miki Wire hardening (F7): see pushOnce(). Doubles from 2x the push
+  // cadence to a 2min cap with jitter; reset to 0 (no backoff) on any ack.
+  void notePushFailureBackoff_() {
+    lastPushFailMs_ = millis();
+    pushBackoffMs_ = pushBackoffMs_ ? min<uint32_t>(pushBackoffMs_ * 2, 120000UL)
+                                    : (uint32_t)(2 * PUSH_PERIOD_MS);
+    pushBackoffMs_ += (esp_random() % 1000);
+  }
+
   Store* st_ = nullptr;
   EventQueue* q_ = nullptr;
   uint32_t lastWifiTry_ = 0;
   uint32_t backoff_ = WIFI_RETRY_MS;
+  uint32_t pushBackoffMs_ = 0;      // F7: 0 = no backoff active
+  uint32_t lastPushFailMs_ = 0;
   bool     wifiAuthorityPaused_ = false;   // DM-Phase 2: see setWifiAuthorityPaused()
 
   // ---- DM-Phase 1 (local diagnostics) ----
