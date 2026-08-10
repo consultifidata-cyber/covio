@@ -15,7 +15,7 @@
 #pragma once
 
 // ---- Firmware identity (bump on every release; OTA compares against this) ---
-#define FW_VERSION            "1.0.0"
+#define FW_VERSION            "1.0.2"
 #define DEVICE_MODEL          "covio-oilflow-v1"
 
 // ---- RISK-15 remediation (OTA anti-downgrade) --------------------------------
@@ -35,7 +35,7 @@
 // remains here ONLY so the bench stub (server/server.py, still plain HTTP)
 // keeps working with zero config changes -- a deliberate, permanent
 // bench/dev affordance, not a leftover TODO.
-#define DEFAULT_SERVER_URL    "http://192.168.1.3:8000"
+#define DEFAULT_SERVER_URL    "https://data.funtastik.co.in"
 #define DEFAULT_API_KEY       "dev-key-change-me"
 
 // ---- API paths (the shared contract; identical on LCS and cloud) ------------

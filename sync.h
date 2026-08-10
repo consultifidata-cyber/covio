@@ -221,6 +221,23 @@ public:
         st_->setCfgVer((uint32_t)ver);
         Serial.printf("[SYNC] new calibration v%ld  K=%.4f\n", ver, k);
       }
+      // v1.0.1 (OTA-deadlock fix): also accept server_time_ms from the
+      // config response, exactly as pushOnce() does. Previously the ONLY
+      // time source was a successful push's ack -- a device that cannot
+      // push (e.g. the pre-rollover flash-full wedge: queue drained+full,
+      // pushOnce() returns before any HTTP) never obtained a time
+      // estimate, so ota.h's fail-closed expiry check rejected EVERY
+      // manifest (OTA_AUTH_NO_TIME_SOURCE) and the one remote-recovery
+      // path was dead. Config polls kept succeeding throughout that wedge
+      // -- this line is what would have kept OTA reachable. Harmless when
+      // the server omits the field (extractInt64_ fails closed, state
+      // untouched).
+      int64_t serverTimeMs = 0;
+      if (extractInt64_(r, "server_time_ms", &serverTimeMs) && serverTimeMs >= 0) {
+        serverUnixS_ = (long)(serverTimeMs / 1000);
+        serverTimeCapturedAtMs_ = millis();
+        haveServerTime_ = true;
+      }
     }
     http.end();
   }
