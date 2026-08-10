@@ -273,7 +273,13 @@ void loop() {
     tTelemetry = now;
     seq++;
     uint64_t total = totalizer.total();     // live read (base + acc + PCNT)
-    QRow row = Telemetry::build(store, total, seq, now / 1000, false);
+    // Miki Wire hardening (Phase-0 finding F10): QUEUE_HIGHWATER was defined
+    // but never consulted -- backlogHigh was hardcoded false, so the
+    // QUALITY_BACKLOG_HIGH bit (already in the payload contract, already
+    // stored by the server) never fired. Wire the real backlog state in so
+    // storage pressure is finally visible remotely, not just on the LAN API.
+    QRow row = Telemetry::build(store, total, seq, now / 1000,
+                                eventQueue.pendingCount() > QUEUE_HIGHWATER);
     eventQueue.append(row);                      // 1) durable row FIRST
     totalizer.service(seq);                 // 2) THEN checkpoint total+seq
     // ORDER MATTERS: if power dies between 1 and 2, this seq regenerates on

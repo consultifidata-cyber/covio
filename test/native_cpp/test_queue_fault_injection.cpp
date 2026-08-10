@@ -395,6 +395,167 @@ TEST(test_begin_does_not_crash_when_ack_state_files_are_corrupt) {
 }
 
 // ---------------------------------------------------------------------------
+// 15. Segment rollover at the QUEUE_SEGMENT_ROWS cap (Miki Wire hardening,
+//     Phase-0 finding F1: the cap existed but no code enforced it).
+// ---------------------------------------------------------------------------
+TEST(test_rollover_starts_next_segment_at_row_cap) {
+  FakeStorageBackend backend;
+  FakeQueueOffsetCheckpoint tot;
+  EventQueue q;
+  q.begin(&tot, &backend);
+
+  // Simulate a full active segment 0: checkpoint sits exactly at the cap.
+  tot.setQueueOffset(0, QUEUE_SEGMENT_ROWS * (uint32_t)sizeof(QRow));
+  int setCountBefore = tot.setCount;
+
+  q.append(makeRow(9001));
+
+  CHECK(tot.setCount == setCountBefore + 1);
+  CHECK(tot.queueOffsetSegment() == 1);                     // rolled over
+  CHECK(tot.queueOffsetOffset() == sizeof(QRow));           // first row of seg 1
+  CHECK(backend.fileExists("/queue/seg_000001.bin"));
+  CHECK(backend.fileSize("/queue/seg_000001.bin") == sizeof(QRow));
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// 16. Interrupted rollover: the first write into the new segment fails/short,
+//     the checkpoint must stay on the old segment; the retry rolls again and
+//     cleans the partial bytes via the normal torn-tail truncate.
+// ---------------------------------------------------------------------------
+TEST(test_interrupted_rollover_checkpoint_unmoved_retry_succeeds) {
+  FakeStorageBackend backend;
+  FakeQueueOffsetCheckpoint tot;
+  EventQueue q;
+  q.begin(&tot, &backend);
+
+  const uint32_t cap = QUEUE_SEGMENT_ROWS * (uint32_t)sizeof(QRow);
+  tot.setQueueOffset(0, cap);
+  int setCountBefore = tot.setCount;
+
+  backend.forceShortWriteLen = 10;          // torn first write into seg 1
+  q.append(makeRow(9001));
+  CHECK(tot.setCount == setCountBefore);    // checkpoint NOT advanced
+  CHECK(tot.queueOffsetSegment() == 0);     // still the old segment
+  CHECK(tot.queueOffsetOffset() == cap);
+  CHECK(q.hasFailedWrite());
+  CHECK(backend.fileSize("/queue/seg_000001.bin") == 10);   // partial bytes
+
+  q.append(makeRow(9001));                  // retry: rolls again, truncates, writes
+  CHECK(tot.queueOffsetSegment() == 1);
+  CHECK(tot.queueOffsetOffset() == sizeof(QRow));
+  CHECK(backend.fileSize("/queue/seg_000001.bin") == sizeof(QRow));
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// 17. Truncate guard (Phase-0 finding F4): a zeroed/regressed checkpoint must
+//     NOT cause blind truncation of a segment full of valid rows -- the rows
+//     are adopted and the append continues after them.
+// ---------------------------------------------------------------------------
+TEST(test_checkpoint_regression_adopts_valid_rows_instead_of_truncating) {
+  FakeStorageBackend backend;   // one physical "flash" across both queue lives
+  {
+    FakeQueueOffsetCheckpoint tot;
+    EventQueue q;
+    q.begin(&tot, &backend);
+    for (uint32_t s = 1; s <= 5; s++) q.append(makeRow(s));   // 5 confirmed rows
+    CHECK(backend.fileSize("/queue/seg_000000.bin") == 5 * sizeof(QRow));
+  }
+  // "Reboot" where BOTH totalizer checkpoint slots were corrupt: recovery
+  // zeroes the queue offset (fresh FakeQueueOffsetCheckpoint = seg 0, off 0).
+  {
+    FakeQueueOffsetCheckpoint tot2;   // zeroed -- the regression scenario
+    EventQueue q2;
+    q2.begin(&tot2, &backend);
+    q2.append(makeRow(6));
+    // The 5 pre-existing rows survived; the new row landed after them.
+    CHECK(backend.fileSize("/queue/seg_000000.bin") == 6 * sizeof(QRow));
+    CHECK(tot2.queueOffsetOffset() == 6 * sizeof(QRow));
+    CHECK(!q2.hasFailedWrite());
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// 18. Truncate guard with a genuine garbage tail beyond the valid rows: the
+//     valid prefix is adopted, ONLY the invalid tail is truncated.
+// ---------------------------------------------------------------------------
+TEST(test_checkpoint_regression_truncates_only_the_invalid_tail) {
+  FakeStorageBackend backend;
+  {
+    FakeQueueOffsetCheckpoint tot;
+    EventQueue q;
+    q.begin(&tot, &backend);
+    for (uint32_t s = 1; s <= 5; s++) q.append(makeRow(s));
+    backend.forceShortWriteLen = 20;          // leaves 20 garbage bytes
+    q.append(makeRow(6));                     // torn -- checkpoint stays at 5 rows
+    CHECK(backend.fileSize("/queue/seg_000000.bin") == 5 * sizeof(QRow) + 20);
+  }
+  {
+    FakeQueueOffsetCheckpoint tot2;           // zeroed checkpoint again
+    EventQueue q2;
+    q2.begin(&tot2, &backend);
+    q2.append(makeRow(6));
+    // 5 valid rows adopted, 20-byte garbage tail truncated, new row appended.
+    CHECK(backend.fileSize("/queue/seg_000000.bin") == 6 * sizeof(QRow));
+    CHECK(tot2.queueOffsetOffset() == 6 * sizeof(QRow));
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// 19. Normal one-row torn tail still takes the original truncate path (the
+//     guard must not change the established <=1-row behavior).
+// ---------------------------------------------------------------------------
+TEST(test_single_row_torn_tail_still_truncated_normally) {
+  FakeStorageBackend backend;
+  FakeQueueOffsetCheckpoint tot;
+  EventQueue q;
+  q.begin(&tot, &backend);
+
+  q.append(makeRow(1));                        // one confirmed row
+  backend.forceShortWriteLen = 30;             // torn write: 30 bytes < one row
+  q.append(makeRow(2));
+  CHECK(backend.fileSize("/queue/seg_000000.bin") == sizeof(QRow) + 30);
+
+  q.append(makeRow(2));                        // truncates the 30-byte tail, writes
+  CHECK(backend.fileSize("/queue/seg_000000.bin") == 2 * sizeof(QRow));
+  CHECK(tot.queueOffsetOffset() == 2 * sizeof(QRow));
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// 20. adoptValidRows_ read-failure fail-safe: if the recovery scan itself
+//     cannot read, the append must not destroy anything it hasn't proven --
+//     adoption stops at the confirmed offset and the truncate applies only
+//     beyond it. (Behavior: readAt failure -> adopt nothing -> tail truncated
+//     as before the guard existed. Data already confirmed is untouched.)
+// ---------------------------------------------------------------------------
+TEST(test_adoption_read_failure_does_not_touch_confirmed_rows) {
+  FakeStorageBackend backend;
+  {
+    FakeQueueOffsetCheckpoint tot;
+    EventQueue q;
+    q.begin(&tot, &backend);
+    for (uint32_t s = 1; s <= 3; s++) q.append(makeRow(s));
+  }
+  {
+    FakeQueueOffsetCheckpoint tot2;           // zeroed checkpoint
+    EventQueue q2;
+    q2.begin(&tot2, &backend);
+    backend.failNextReadAt = true;            // recovery scan cannot read
+    q2.append(makeRow(4));
+    // Scan failed -> nothing adopted -> old (pre-guard) truncate behavior for
+    // the unproven region. The new row is the only content. This is the
+    // deliberate fail-safe floor: never worse than the pre-guard firmware.
+    CHECK(backend.fileSize("/queue/seg_000000.bin") == sizeof(QRow));
+    CHECK(tot2.queueOffsetOffset() == sizeof(QRow));
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 int main() {
   int passed = 0, failed = 0;
   for (auto& t : g_tests) {

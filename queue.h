@@ -37,6 +37,7 @@
 #include "arduino_shim.h"
 #include "queue_offset_checkpoint.h"
 #endif
+#include <string.h>      // memcpy (adoptValidRows_) -- harmless on both targets
 #include "config.h"
 #include "storage_backend.h"
 
@@ -255,6 +256,23 @@ public:
 
     uint32_t activeSeg  = tot_->queueOffsetSegment();
     uint32_t goodOffset = tot_->queueOffsetOffset();
+
+    // ---- ADR-003 segment rollover (Miki Wire hardening, Phase-0 finding F1) --
+    // Activates the QUEUE_SEGMENT_ROWS cap that the segment architecture was
+    // designed around but never enforced: once the active segment holds that
+    // many confirmed rows, this row starts the next segment. The checkpoint
+    // is NOT advanced here -- it moves only in the single setQueueOffset()
+    // call after the durable write below, so an interruption anywhere in
+    // between leaves the old checkpoint intact and the partially-created
+    // next segment is exactly the "interrupted rollover" orphan that
+    // cleanupOrphanSegments_()'s design comment has always described (and
+    // deletes at next boot). With rollover live, ackThrough()'s existing
+    // per-segment deletion finally reclaims acked flash -- closing the
+    // partition-fills-in-~27h failure MW-001 hit in the field.
+    if (goodOffset >= QUEUE_SEGMENT_ROWS * (uint32_t)sizeof(QRow)) {
+      activeSeg  += 1;
+      goodOffset  = 0;
+    }
     String path = segmentPath_(activeSeg);
 
     // ---- determine actual on-disk size --------------------------------------
@@ -282,7 +300,30 @@ public:
     // storage_backend.h) -- production behavior is unchanged; a native test
     // can now deterministically fail this specific call.
     if (actualSize > goodOffset) {
-      if (!backend_->truncateTo(path.c_str(), goodOffset)) {
+      // ---- truncate guard (Miki Wire hardening, Phase-0 finding F4) ---------
+      // A genuine torn tail can never exceed one row: every successful
+      // append truncates the previous tail before writing, and every
+      // confirmed row advances the checkpoint. Finding MORE than one row of
+      // "unconfirmed" bytes therefore means the CHECKPOINT went backwards
+      // (e.g. both dual-slot copies failed CRC at boot and recovery zeroed
+      // it) -- the bytes beyond the checkpoint are overwhelmingly real,
+      // previously-confirmed telemetry. Blind truncation here is what turns
+      // a 36-byte checkpoint fault into multi-megabyte data destruction.
+      // Prove safety before the destructive operation: adopt every
+      // contiguous CRC-valid row, and truncate only the genuinely invalid
+      // tail beyond them.
+      if (actualSize - goodOffset > (uint32_t)sizeof(QRow)) {
+        uint32_t adopted = adoptValidRows_(path.c_str(), goodOffset, actualSize);
+        Serial.printf("[Q] CRITICAL: checkpoint regression on %s -- confirmed "
+                      "offset %u but %u bytes on disk; adopted %u bytes of "
+                      "valid rows instead of truncating them (pending-count "
+                      "diagnostic may read low until next reboot)\n",
+                      path.c_str(), (unsigned)goodOffset,
+                      (unsigned)actualSize, (unsigned)adopted);
+        goodOffset = adopted;
+      }
+      if (actualSize > goodOffset &&
+          !backend_->truncateTo(path.c_str(), goodOffset)) {
         Serial.printf("[Q] truncate FAILED path=%s to=%u\n",
                       path.c_str(), (unsigned)goodOffset);
         recordWriteFailure_(QFAIL_TRUNCATE);
@@ -476,6 +517,11 @@ public:
     // disagree about what counts as "read" vs "acknowledged." -------------
     uint32_t seg = ack_.cursor_segment;
     uint32_t off = ack_.cursor_offset;
+    const uint32_t firstSeg = seg;   // rollover hardening: lowest segment this
+                                     // ack could possibly free -- bounds the
+                                     // deletion loop below (anything lower was
+                                     // freed by an earlier ack; crash-stranded
+                                     // leftovers are swept at boot instead)
     const uint32_t activeSeg = tot_->queueOffsetSegment();
     // DM-Phase 1: counts every row this walk consumes (torn/junk OR
     // genuinely newly-acked) -- exactly the rows pending()'s own skip logic
@@ -549,7 +595,14 @@ public:
     // NEVER deleted before its corresponding cursor advance is durable.
     persistAck_();
 
-    for (uint32_t s = 0; s < seg; s++) {
+    // Rollover hardening: bounded to the segments THIS ack's walk actually
+    // crossed ([firstSeg, seg)), not [0, seg) -- with real rollover the old
+    // unbounded range would re-attempt thousands of removes of long-gone
+    // files on every ack. A segment stranded by a crash between
+    // persistAck_() above and its remove below is swept at the next boot
+    // (cleanupOrphanSegments_'s below-cursor sweep), preserving the original
+    // "never deleted before its cursor advance is durable" guarantee.
+    for (uint32_t s = firstSeg; s < seg; s++) {
       LittleFS.remove(segmentPath_(s));   // range is always < seg <= activeSeg --
                                      // the active segment is never deleted
     }
@@ -717,6 +770,40 @@ private:
     return ~crc;
   }
 
+  // Miki Wire hardening (Phase-0 finding F4): scans `path` forward from
+  // `from` in whole-QRow strides, validating magic+CRC exactly as
+  // pendingImpl_() does, and returns the end offset of the last contiguous
+  // valid row (>= from). Bytes beyond the returned offset failed validation
+  // -- a genuine torn/garbage tail, safe to truncate. Reads through backend_
+  // in multi-row chunks so recovering even a multi-MB segment is bounded
+  // I/O per call, and so the fault-injection harness can exercise this path
+  // (readAt is part of the StorageBackend seam). Only ever called on the
+  // regression paths (append()'s truncate guard, boot reconciliation) --
+  // never on the per-second hot path.
+  uint32_t adoptValidRows_(const char* path, uint32_t from, uint32_t fileSize) {
+    uint8_t buf[sizeof(QRow) * 32];
+    uint32_t off = from;
+    while (off + (uint32_t)sizeof(QRow) <= fileSize) {
+      size_t want = fileSize - off;
+      if (want > sizeof(buf)) want = sizeof(buf);
+      want -= want % sizeof(QRow);
+      long got = backend_->readAt(path, off, buf, want);
+      if (got < (long)sizeof(QRow)) break;   // read failure/EOF: adopt what we have
+      size_t rows = (size_t)got / sizeof(QRow);
+      bool stop = false;
+      for (size_t i = 0; i < rows; i++) {
+        QRow r;
+        memcpy(&r, buf + i * sizeof(QRow), sizeof(r));
+        if (r.magic != QROW_MAGIC) { stop = true; break; }
+        uint32_t wantCrc = r.crc32; r.crc32 = 0;
+        if (crc32_((uint8_t*)&r, sizeof(r)) != wantCrc) { stop = true; break; }
+        off += (uint32_t)sizeof(QRow);
+      }
+      if (stop) break;
+    }
+    return off;
+  }
+
   // RISK-04 phase-2: routed through StorageBackend, same rationale as
   // loadFail_/persistFail_ above -- AckRec recovery happens in the SAME
   // begin() call as FailureState recovery, so both must work identically
@@ -844,21 +931,37 @@ private:
     return true;
   }
 
-  // Deletes any segment file numbered strictly above the checkpoint's
-  // active segment. The only way such a file can exist is an interrupted
-  // rollover (segment file created, but the write-offset checkpoint never
-  // advanced to point at it before a crash) — see
-  // Docs/PHASE2_DESIGN_REPORT.md §5.6. A no-op if tot_ is null (pre-P2-T8).
+  // Boot-time segment reconciliation (rollover hardening extends the
+  // original orphan cleanup). Three concerns, in safety order:
+  //
+  //  1. CHECKPOINT-REGRESSION DETECTION: a legitimately interrupted rollover
+  //     creates EXACTLY activeSeg+1 (the checkpoint advances before a second
+  //     rollover can ever start). Segment ids beyond activeSeg+1 mean the
+  //     checkpoint went BACKWARDS (both slots corrupt -> zeroed recovery) --
+  //     those "orphans" are real, live data, and deleting them would be the
+  //     boot-time twin of append()'s blind-truncate hazard. Adopt the
+  //     highest segment as active (valid-row prefix as confirmed offset),
+  //     delete nothing this boot.
+  //  2. INTERRUPTED-ROLLOVER ORPHAN: exactly activeSeg+1, deleted as always
+  //     (its rows were never confirmed -- their seqs regenerate).
+  //  3. BELOW-CURSOR STRAYS: segments below ack_.cursor_segment are fully
+  //     acknowledged by the durable-cursor-before-delete ordering; one can
+  //     survive only via a crash between persistAck_() and its remove in
+  //     ackThrough(). Swept here since ackThrough()'s delete loop is now
+  //     bounded to the segments each ack actually crosses.
   //
   // Two-pass by design: directory-mutation-during-iteration safety is
   // unverified for this codebase's SD/VFS toolchain. Pass 1 only
   // enumerates; Pass 2 only deletes, after the directory handle is closed.
+  // A no-op if tot_ is null (pre-P2-T8).
   void cleanupOrphanSegments_() {
     if (!tot_) return;
     uint32_t activeSeg = tot_->queueOffsetSegment();
 
-    uint32_t orphanIds[MAX_ORPHAN_CANDIDATES];
-    int orphanCount = 0;
+    uint32_t deleteIds[MAX_ORPHAN_CANDIDATES];
+    int deleteCount = 0;
+    uint32_t maxSegSeen = 0;
+    bool     anySeg = false;
 
     File dir = LittleFS.open(SD_QUEUE_DIR);
     if (!dir || !dir.isDirectory()) { if (dir) dir.close(); return; }
@@ -869,12 +972,16 @@ private:
       f.close();
       if (!isDir) {
         uint32_t id;
-        if (parseSegmentId_(name, id) && id > activeSeg) {
-          if (orphanCount < MAX_ORPHAN_CANDIDATES) {
-            orphanIds[orphanCount++] = id;
-          } else {
-            Serial.println("[Q] orphan-segment candidate list full -- "
-                            "remainder will be retried next boot");
+        if (parseSegmentId_(name, id)) {
+          if (!anySeg || id > maxSegSeen) maxSegSeen = id;
+          anySeg = true;
+          if (id > activeSeg || id < ack_.cursor_segment) {
+            if (deleteCount < MAX_ORPHAN_CANDIDATES) {
+              deleteIds[deleteCount++] = id;
+            } else {
+              Serial.println("[Q] segment cleanup candidate list full -- "
+                              "remainder will be retried next boot");
+            }
           }
         }
       }
@@ -882,8 +989,25 @@ private:
     }
     dir.close();   // directory handle fully closed before any delete
 
-    for (int i = 0; i < orphanCount; i++) {
-      LittleFS.remove(segmentPath_(orphanIds[i]));
+    if (anySeg && maxSegSeen > activeSeg + 1) {
+      // Concern 1: checkpoint regression. Adopt, don't delete.
+      String p = segmentPath_(maxSegSeen);
+      File sf = LittleFS.open(p, FILE_READ);
+      uint32_t sz = sf ? (uint32_t)sf.size() : 0;
+      if (sf) sf.close();
+      uint32_t adopted = adoptValidRows_(p.c_str(), 0, sz);
+      Serial.printf("[Q] CRITICAL: checkpoint regression at boot -- active "
+                    "segment is %u but segments up to %u exist on flash; "
+                    "adopting seg=%u offset=%u as the live frontier; no "
+                    "segment deletion this boot\n",
+                    (unsigned)activeSeg, (unsigned)maxSegSeen,
+                    (unsigned)maxSegSeen, (unsigned)adopted);
+      tot_->setQueueOffset(maxSegSeen, adopted);
+      return;
+    }
+
+    for (int i = 0; i < deleteCount; i++) {
+      LittleFS.remove(segmentPath_(deleteIds[i]));
     }
   }
 #endif  // NATIVE_TEST -- see the matching #ifndef above cleanupOrphanSegments_()

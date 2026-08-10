@@ -24,6 +24,7 @@ public:
   bool failNextAppendWrite = false;
   long forceShortWriteLen = -1;          // if >=0, appendWrite "writes" exactly this many bytes instead of `len`
   bool failNextWriteWhole = false;
+  bool failNextReadAt = false;               // Miki Wire hardening: adoptValidRows_ seam
   bool corruptOnNextReadWhole_path = false;  // see corruptPath below
   std::string corruptPath;                    // if set, readWhole() for this exact path returns garbage
 
@@ -76,6 +77,16 @@ public:
     if (failNextWriteWhole) { failNextWriteWhole = false; return false; }
     files_[path].assign(data, data + len);
     return true;
+  }
+
+  long readAt(const char* path, size_t offset, uint8_t* out, size_t len) override {
+    if (failNextReadAt) { failNextReadAt = false; return -1; }
+    auto it = files_.find(path);
+    if (it == files_.end()) return -1;
+    if (offset >= it->second.size()) return 0;
+    size_t n = std::min(len, it->second.size() - offset);
+    memcpy(out, it->second.data() + offset, n);
+    return (long)n;
   }
 
   size_t totalBytes() override { return totalBytesValue; }

@@ -55,6 +55,15 @@ public:
   // checkpoint records, which are always read whole, never partially.
   virtual long readWhole(const char* path, uint8_t* out, size_t outCap) = 0;
 
+  // ---- bounded positional read (checkpoint-regression recovery scan) -------
+  // Miki Wire hardening (Phase-0 finding F4): reads up to `len` bytes of
+  // `path` starting at byte `offset` into `out`. Returns the number of bytes
+  // actually read (0 at/past EOF), or -1 if the file does not exist or could
+  // not be opened. Added so EventQueue::adoptValidRows_() can validate a
+  // segment's existing rows in bounded chunks BEFORE any truncation decision
+  // -- the same fault-injection seam discipline as every method above.
+  virtual long readAt(const char* path, size_t offset, uint8_t* out, size_t len) = 0;
+
   // Overwrites `path` with exactly `data`/`len` (FILE_WRITE semantics:
   // truncate-then-write, matching queue.h's existing persistFail_()/
   // persistAck_() pattern). Returns true on success.
@@ -110,6 +119,15 @@ public:
     size_t sz = f.size();
     if (sz > outCap) sz = outCap;
     size_t got = f.read(out, sz);
+    f.close();
+    return (long)got;
+  }
+
+  long readAt(const char* path, size_t offset, uint8_t* out, size_t len) override {
+    File f = LittleFS.open(path, FILE_READ);
+    if (!f) return -1;
+    if (!f.seek(offset)) { f.close(); return 0; }
+    size_t got = f.read(out, len);
     f.close();
     return (long)got;
   }
