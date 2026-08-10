@@ -44,6 +44,36 @@ class SignManifestToolTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             sign_manifest.gen_test_key(self.key_path)
 
+    def test_gen_production_key_produces_a_real_p256_keypair(self):
+        """Balaji V1 freeze remediation: --gen-production-key must be
+        cryptographically identical to --gen-test-key (same curve, same
+        real usable key) -- it differs only in destination path and
+        operator messaging, never in the key material itself."""
+        prod_key_path = os.path.join(self.tmpdir, "production_key.pem")
+        sign_manifest.gen_production_key(prod_key_path)
+        with open(prod_key_path, "rb") as f:
+            priv = serialization.load_pem_private_key(f.read(), password=None)
+        self.assertIsInstance(priv.curve, ec.SECP256R1)
+        # A signature made with this key must actually verify -- proves the
+        # production path produces a real, usable keypair, not a stub.
+        pub = priv.public_key()
+        sig = priv.sign(b"probe", ec.ECDSA(hashes.SHA256()))
+        pub.verify(sig, b"probe", ec.ECDSA(hashes.SHA256()))  # raises if invalid
+
+    def test_gen_production_key_refuses_to_overwrite_existing_key(self):
+        prod_key_path = os.path.join(self.tmpdir, "production_key.pem")
+        sign_manifest.gen_production_key(prod_key_path)
+        with self.assertRaises(SystemExit):
+            sign_manifest.gen_production_key(prod_key_path)
+
+    def test_gen_production_key_writes_owner_only_permissions(self):
+        if os.name == "nt":
+            self.skipTest("POSIX file-mode bits are not meaningful on Windows")
+        prod_key_path = os.path.join(self.tmpdir, "production_key.pem")
+        sign_manifest.gen_production_key(prod_key_path)
+        mode = os.stat(prod_key_path).st_mode & 0o777
+        self.assertEqual(mode, 0o600)
+
     def test_canonical_string_field_order_and_delimiter(self):
         fields = {
             "hw_compat": "covio-oilflow-v1", "version": "1.0.1", "security_version": 1,

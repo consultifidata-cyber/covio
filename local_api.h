@@ -34,13 +34,19 @@
 #include "sync.h"
 #include "ota.h"
 #include "diagnostics.h"
+#include "sensor_stuck.h"
 
 class LocalApi {
 public:
   // Approved DM-Phase 1 global (MASTER_GOVERNANCE.md §2: "no new globals
   // beyond what an approved phase calls for" -- this phase is that approval).
-  void begin(Store* st, Totalizer* tot, EventQueue* q, Sync* sync, Ota* ota) {
-    st_ = st; tot_ = tot; q_ = q; sync_ = sync; ota_ = ota;
+  // Balaji V1 freeze remediation: `stuck` is a 6th pointer, same pattern as
+  // the existing five -- this class does not own or construct it, only
+  // reads it (isStuck()/msSinceLastChange() are const, read-only queries;
+  // see sensor_stuck.h), consistent with every other module here.
+  void begin(Store* st, Totalizer* tot, EventQueue* q, Sync* sync, Ota* ota,
+             SensorStuckDetector* stuck) {
+    st_ = st; tot_ = tot; q_ = q; sync_ = sync; ota_ = ota; stuck_ = stuck;
 
     server_.on("/api/v1/info",    HTTP_GET, [this]() { handleInfo_(); });
     server_.on("/api/v1/status",  HTTP_GET, [this]() { handleStatus_(); });
@@ -88,22 +94,31 @@ private:
   }
 
   void handleStatus_() {
+    uint32_t now = millis();
     server_.send(200, "application/json",
-                 Diagnostics::buildStatusJson(*st_, *tot_, *q_, *sync_, *ota_, sdPresent_()));
+                 Diagnostics::buildStatusJson(*st_, *tot_, *q_, *sync_, *ota_, sdPresent_(),
+                                               st_->crashResetStreak(), stuck_->isStuck(now)));
   }
 
   void handleHealth_() {
+    uint32_t now = millis();
     server_.send(200, "application/json",
-                 Diagnostics::buildHealthJson(*q_, *sync_, *ota_, sdPresent_()));
+                 Diagnostics::buildHealthJson(*q_, *sync_, *ota_, sdPresent_(),
+                                               st_->crashResetStreak(), stuck_->isStuck(now)));
   }
 
   void handleMetrics_() {
     int16_t snapshot[RSSI_HISTORY_LEN];
     int n = snapshotRssiHistory_(snapshot);
+    uint32_t now = millis();
     server_.send(200, "application/json",
                  Diagnostics::buildMetricsJson(*q_, *sync_, sdPresent_(),
                                                 havePulseFreqHz_, lastPulseFreqHz_,
-                                                snapshot, n));
+                                                snapshot, n,
+                                                st_->restartCount(), st_->watchdogResetCount(),
+                                                st_->brownoutResetCount(), st_->pushFailCount(),
+                                                st_->wifiReconnectCount(), st_->crashResetStreak(),
+                                                stuck_->isStuck(now), stuck_->msSinceLastChange(now)));
   }
 
   // GET / -- plain HTML mirror of /api/v1/status, for a factory tech with
@@ -112,7 +127,8 @@ private:
   // body back apart -- so the same no-secrets guarantee applies identically.
   void handleHtml_() {
     bool sdOk = sdPresent_();
-    String health = Diagnostics::healthStateOnly(*q_, *sync_, *ota_, sdOk);
+    String health = Diagnostics::healthStateOnly(*q_, *sync_, *ota_, sdOk,
+                                                  st_->crashResetStreak(), stuck_->isStuck(millis()));
 
     String h;
     h.reserve(1024);
@@ -359,6 +375,7 @@ private:
   EventQueue* q_ = nullptr;
   Sync* sync_ = nullptr;
   Ota* ota_ = nullptr;
+  SensorStuckDetector* stuck_ = nullptr;   // Balaji V1 freeze remediation
 
   bool mdnsStarted_ = false;
   uint32_t lastSampleMs_ = 0;

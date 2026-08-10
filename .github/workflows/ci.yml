@@ -238,6 +238,15 @@ jobs:
       - name: Build bench/dev firmware (esp32dev)
         run: pio run -e esp32dev
 
+      # Multi-board enhancement: compile-verify the 8DI-8DO + CT variant on
+      # every push, exactly like esp32dev (compile verification only, no
+      # artifact -- variant artifact publishing is a release-engineering
+      # decision taken when that deployment's release is actually cut).
+      # This closes the disclosed gap that no -DBOARD_MODE=1/-DSENSOR_MODE=1
+      # firmware image had ever been CI-compiled.
+      - name: Build 8DI-8DO + CT variant firmware (esp32dev-8di8do-ct)
+        run: pio run -e esp32dev-8di8do-ct
+
       - name: Build production firmware (release)
         run: pio run -e release
 
@@ -362,6 +371,46 @@ jobs:
       - name: Run RISK-16 OTA manifest authenticity tests
         working-directory: test/native_cpp
         run: ./test_ota_manifest_auth
+
+      - name: Compile Balaji V1 freeze sensor-stuck-detection tests
+        working-directory: test/native_cpp
+        run: |
+          g++ -std=c++14 -Wall -I../.. \
+            test_sensor_stuck.cpp -o test_sensor_stuck
+
+      - name: Run Balaji V1 freeze sensor-stuck-detection tests
+        working-directory: test/native_cpp
+        run: ./test_sensor_stuck
+
+      - name: Compile CT-clamp sensor acquisition tests
+        working-directory: test/native_cpp
+        run: |
+          g++ -std=c++14 -Wall -I../.. \
+            test_sensor_ct.cpp -o test_sensor_ct
+
+      - name: Run CT-clamp sensor acquisition tests
+        working-directory: test/native_cpp
+        run: ./test_sensor_ct
+
+      # Multi-board enhancement: pin-table regression guard, compiled TWICE
+      # -- once flag-less (must resolve to the deployed production baseline:
+      # BOARD_RELAY1CH pins + NPN) and once with the 8DI-8DO/CT overrides.
+      # The assertions are static_asserts, so a wrong pin or a changed
+      # default fails the COMPILE step, not just the run step.
+      - name: Compile+run board-config pin-table guard (production default)
+        working-directory: test/native_cpp
+        run: |
+          g++ -std=c++14 -Wall -I../.. \
+            test_board_config.cpp -o test_board_config_default
+          ./test_board_config_default
+
+      - name: Compile+run board-config pin-table guard (8DI-8DO + CT variant)
+        working-directory: test/native_cpp
+        run: |
+          g++ -std=c++14 -Wall -I../.. \
+            -DBOARD_MODE=1 -DSENSOR_MODE=1 -DEXPECT_BOARD=1 -DEXPECT_SENSOR=1 \
+            test_board_config.cpp -o test_board_config_variant
+          ./test_board_config_variant
 
   # ---------------------------------------------------------------------
   # Desktop app -- Windows (the app's actual shipped target) and Ubuntu

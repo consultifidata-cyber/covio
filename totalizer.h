@@ -138,6 +138,15 @@ public:
 
   uint32_t lastSeq() { return cp_.seq; }
 
+  // ---- CT-clamp enhancement (SENSOR_MODE_CT builds only) -------------------
+  // Feeds software-synthesized pulses (sensor_ct.h's time-integrated
+  // current-presence stream) into the SAME accumulator the PCNT drain path
+  // adds to -- so total()/service()'s existing checkpoint/recovery machinery
+  // persists them with zero further changes. The only call site lives behind
+  // `#if SENSOR_MODE == SENSOR_MODE_CT` in covio_firmware.ino; an NPN build
+  // never calls this and its PCNT hardware path is untouched either way.
+  void injectSoftPulses(uint32_t n) { accumulated_ += n; }
+
   // ---- ADR-003 (Phase 2): queue write-offset checkpoint accessors --------
   // setQueueOffset() persists synchronously (same pattern as ackThrough()'s
   // synchronous persist in queue.h) via the existing dual-slot CRC persist_().
@@ -152,8 +161,13 @@ public:
 
 private:
   void setupPCNT_() {
-    // Real sensor wiring (Waveshare ESP32-S3-Relay-1CH unit): PIN_PULSE
-    // (GPIO1/"IO1") is fed by a generic PC817 opto-isolator module's
+    // PRODUCTION BOARD UPDATE (8DI-8DO retarget): PIN_PULSE is now the DI1
+    // terminal's GPIO (see config.h's retarget note); the ONBOARD
+    // bidirectional optocoupler replaces the external module below, but the
+    // electrical reasoning for INPUT_PULLUP is unchanged (opto output stage
+    // sinks the GPIO low when active, needs a defined idle-high level).
+    // Historical wiring note (Waveshare ESP32-S3-Relay-1CH unit): PIN_PULSE
+    // (GPIO1/"IO1") was fed by a generic PC817 opto-isolator module's
     // open-collector output -- idles floating/undefined with nothing
     // externally pulling it up, and pulls LOW when the isolator's LED side
     // triggers. Enabling the internal pull-up here means only the

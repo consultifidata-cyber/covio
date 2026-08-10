@@ -569,6 +569,26 @@ public:
     QRow tmp[1];
     return pending(tmp, 1) == 0;
   }
+
+  // MW-001 queue storage recovery: deletes the single, never-rotated
+  // segment file (proven via live `ls` enumeration to be the sole segment,
+  // consuming the entire queue partition) and resets ONLY the write-
+  // position cursors -- Totalizer's q_segment/q_offset (via the existing
+  // setQueueOffset(0,0)) and this queue's own cursor_segment/cursor_offset
+  // -- to 0, so future appends start a fresh, empty segment 0. Deliberately
+  // does NOT touch ack_.acked_seq (already correctly fast-forwarded by
+  // resetAckToCurrentPosition in a prior step) or any NVS/totalizer.total
+  // state. Persists via the existing persistAck_() verbatim -- no new
+  // persistence mechanism. Explicit operator command only (provision.h's
+  // `recover_queue`), never automatic.
+  void recoverQueueStorage() {
+    if (!tot_) return;
+    LittleFS.remove(segmentPath_(0));
+    tot_->setQueueOffset(0, 0);
+    ack_.cursor_segment = 0;
+    ack_.cursor_offset  = 0;
+    persistAck_();
+  }
 #endif  // NATIVE_TEST -- see the matching #ifndef above appendLegacy_()
 
   // DM-Phase 1 (local diagnostics, §13 A.3 /api/v1/status "queue" object) --
@@ -579,6 +599,23 @@ public:
   // dual-path split in this class.
   uint32_t pendingCount() { return unackedCount_; }
   uint32_t ackedSeq()     { return ack_.acked_seq; }
+
+  // MW-001 commissioning reset: fast-forwards the ack cursor (and its
+  // persisted read cursor) to the CURRENT write position, so pending()
+  // stops filtering newly-built records against a stale acked_seq
+  // inherited from a prior backend relationship. Explicit, operator-
+  // triggered only (provision.h's `reset_ack` command) -- never automatic.
+  // Reuses persistAck_() verbatim -- no new persistence mechanism. Does
+  // NOT touch the Totalizer's own checkpoint (total/seq) at all -- lifetime
+  // pulse count history is completely unaffected by this call.
+  void resetAckToCurrentPosition(uint32_t currentSeq) {
+    if (!tot_) return;
+    ack_.acked_seq      = currentSeq;
+    ack_.cursor_segment = tot_->queueOffsetSegment();
+    ack_.cursor_offset  = tot_->queueOffsetOffset();
+    unackedCount_ = 0;   // everything up to currentSeq is now acked/abandoned
+    persistAck_();
+  }
 
   // DM-Phase 1 (local diagnostics, §13 A.3 /api/v1/metrics) -- "have" flags
   // distinguish "never measured yet this boot" from a genuine 0ms result.

@@ -23,6 +23,7 @@
 // FILE LAYOUT: all .h files must sit in the SAME folder as this .ino.
 // ============================================================================
 #include <LittleFS.h>
+#include "esp_system.h"    // esp_reset_reason() -- Balaji V1 freeze remediation
 #include "config.h"
 #include "store.h"
 #include "totalizer.h"
@@ -33,6 +34,10 @@
 #include "provision.h"
 #include "local_api.h"
 #include "wifi_provision.h"
+#include "sensor_stuck.h"  // Balaji V1 freeze remediation
+#if SENSOR_MODE == SENSOR_MODE_CT
+#include "sensor_ct.h"     // CT-clamp acquisition -- compiled ONLY into CT builds
+#endif
 
 Store         store;
 Totalizer     totalizer;
@@ -42,10 +47,19 @@ Ota           ota;
 Provision     provision;
 LocalApi      localApi;         // DM-Phase 1: read-only local diagnostics API
 WifiProvision wifiProvision;    // DM-Phase 2: SoftAP + captive-portal provisioning
+// Balaji V1 freeze remediation (Product Readiness Review P1-2): heuristic
+// sensor-stuck-at-zero detector, see sensor_stuck.h.
+SensorStuckDetector sensorStuck(SENSOR_STUCK_THRESHOLD_MS);
+#if SENSOR_MODE == SENSOR_MODE_CT
+// CT-clamp enhancement: converts debounced current-presence (DI2) into the
+// same raw-pulse stream the NPN/PCNT path produces. See sensor_ct.h.
+SensorCt sensorCt(CT_PULSE_HZ, CT_DEBOUNCE_MS);
+#endif
 
 uint32_t seq = 0;              // GLOBALLY monotonic telemetry sequence
 uint32_t tTelemetry = 0, tPush = 0, tConfig = 0, tOta = 0;
 bool     healthySignalled = false;
+bool     crashStreakCleared = false;   // Balaji V1 freeze remediation
 
 void setup() {
   Serial.begin(115200);
@@ -58,12 +72,49 @@ void setup() {
   Serial.printf("build_commit=%s  build_dirty=%d  build_time_utc=%s\n",
                 BUILD_COMMIT, BUILD_DIRTY, BUILD_TIME_UTC);
 
-  // 1) config/identity first (also increments boot_id)
+  // 1) config/identity first (also increments boot_id and restart_cnt)
   store.begin();
-  provision.begin(&store);
+  // reset_ack (MW-001 commissioning reset) needs EventQueue/Totalizer;
+  // safe to bind here even though their own begin() runs later below --
+  // provision.begin() only stores the pointers, never dereferences them
+  // until an operator actually types reset_ack over serial.
+  provision.begin(&store, &eventQueue, &totalizer);
   Serial.printf("device_id=%s  boot_id=%u\n",
                 store.deviceId().c_str(), store.bootId());
   Serial.println("(serial console ready — type 'help')");
+
+  // Balaji V1 freeze remediation (Product Readiness Review P1-1): classify
+  // THIS boot's cause exactly once, via the same esp_reset_reason() call
+  // diagnostics.h already reads on-demand elsewhere in this same
+  // translation unit -- that ESP-IDF call is stable for the whole boot, so
+  // this is a second read of the same hardware-latched value, not a second
+  // source of truth. Bumps the matching persistent NVS counter and the
+  // crash-reset streak (cleared below once this boot proves healthy).
+  {
+    esp_reset_reason_t rr = esp_reset_reason();
+    bool abnormal = false;
+    switch (rr) {
+      case ESP_RST_INT_WDT:
+      case ESP_RST_TASK_WDT:
+      case ESP_RST_WDT:
+        store.incrementWatchdogResetCount();
+        abnormal = true;
+        break;
+      case ESP_RST_BROWNOUT:
+        store.incrementBrownoutResetCount();
+        abnormal = true;
+        break;
+      case ESP_RST_PANIC:
+        abnormal = true;
+        break;
+      default:
+        break;
+    }
+    if (abnormal) store.incrementCrashResetStreak();
+    Serial.printf("[DIAG] restarts=%u watchdog=%u brownout=%u crash_streak=%u\n",
+                  store.restartCount(), store.watchdogResetCount(),
+                  store.brownoutResetCount(), store.crashResetStreak());
+  }
 
   // DM-Phase 5 (ADR-005 Definition of Done: "no device leaves the factory
   // floor with the default API key active"). RELEASE_BUILD is 0 for every
@@ -135,7 +186,7 @@ void setup() {
     // getters it reads (queue backlog, ota state, etc.) are all already wired;
     // its own mDNS start is deferred internally until the STA connection is
     // actually confirmed (local_api.h's own service() logic).
-    localApi.begin(&store, &totalizer, &eventQueue, &syncEngine, &ota);
+    localApi.begin(&store, &totalizer, &eventQueue, &syncEngine, &ota, &sensorStuck);
   } else {
     // DM-Phase 2: station connection did not succeed within the bounded
     // wait above, or `provision` explicitly requested re-entry -- fall back
@@ -152,6 +203,25 @@ void setup() {
   digitalWrite(PIN_SIM, LOW);
   Serial.printf("[SIM] test pulses ON: GPIO%d @ ~%d Hz — jumper to GPIO%d\n",
                 PIN_SIM, SIM_HZ, PIN_PULSE);
+#endif
+
+#if BOARD_MODE == BOARD_8DI8DO
+  // Multi-board enhancement: identify the non-default board variant on the
+  // boot console (commissioning aid + cross-flash detection). The default
+  // BOARD_RELAY1CH build prints nothing here, keeping the deployed
+  // production baseline's serial output byte-identical.
+  Serial.printf("[BOARD] ESP32-S3-POE-ETH-8DI-8DO (BOARD_MODE=%d): pulse=GPIO%d ct=GPIO%d\n",
+                BOARD_MODE, PIN_PULSE, PIN_CT_STATE);
+#endif
+
+#if SENSOR_MODE == SENSOR_MODE_CT
+  // CT-clamp enhancement: DI2 (PIN_CT_STATE) carries the CT current-sensing
+  // switch's contact state through the board's inverting optocoupler
+  // (active = GPIO reads LOW). INPUT_PULLUP gives the defined inactive-high
+  // idle -- same posture as PIN_PULSE's own pull-up in totalizer.h.
+  pinMode(PIN_CT_STATE, INPUT_PULLUP);
+  Serial.printf("[CT] sensor mode CT: DI2/GPIO%d, %d pulse/s while current present\n",
+                PIN_CT_STATE, CT_PULSE_HZ);
 #endif
 
   Serial.println("[BOOT] entering main loop");
@@ -171,7 +241,7 @@ void loop() {
       // Station WiFi just confirmed while AP mode was active -- hand WiFi
       // authority back to Sync and start normal-operation local diagnostics.
       syncEngine.setWifiAuthorityPaused(false);
-      localApi.begin(&store, &totalizer, &eventQueue, &syncEngine, &ota);
+      localApi.begin(&store, &totalizer, &eventQueue, &syncEngine, &ota, &sensorStuck);
     }
     delay(5);
     return;
@@ -189,6 +259,15 @@ void loop() {
   }
 #endif
 
+#if SENSOR_MODE == SENSOR_MODE_CT
+  // CT-clamp acquisition: debounced active-low DI2 level -> time-integrated
+  // pulse synthesis (robust to blocking network gaps: the integral catches
+  // up on return, see sensor_ct.h) -> the SAME accumulator the PCNT drain
+  // path feeds. Everything below this line is identical in both modes.
+  totalizer.injectSoftPulses(
+      sensorCt.service(digitalRead(PIN_CT_STATE) == LOW, now));
+#endif
+
   // ---- build a telemetry record every TELEMETRY_PERIOD_MS ----
   if (now - tTelemetry >= TELEMETRY_PERIOD_MS) {
     tTelemetry = now;
@@ -201,6 +280,22 @@ void loop() {
     // next boot and the duplicate row is absorbed by the server (idempotent).
     // The reverse order could burn a seq with no row behind it — a permanent
     // gap that freezes the cumulative ACK forever.
+
+    // Balaji V1 freeze remediation (Product Readiness Review P1-2): feed
+    // the same `total` reading already taken above into the stuck-sensor
+    // heuristic, once per telemetry cycle. Read-only elsewhere (local_api.h)
+    // via isStuck()/msSinceLastChange() -- this is the ONLY call site that
+    // mutates sensorStuck's state.
+    sensorStuck.update(total, now);
+  }
+
+  // Balaji V1 freeze remediation (Product Readiness Review P1-1): a run
+  // that survives HEALTHY_UPTIME_CLEARS_CRASH_STREAK_MS (config.h) is
+  // evidence THIS boot is not part of a crash loop, whatever caused past
+  // resets -- clears the persisted streak exactly once per boot.
+  if (!crashStreakCleared && now >= HEALTHY_UPTIME_CLEARS_CRASH_STREAK_MS) {
+    store.clearCrashResetStreak();
+    crashStreakCleared = true;
   }
 
   // ---- flush queue to the configured endpoint ----

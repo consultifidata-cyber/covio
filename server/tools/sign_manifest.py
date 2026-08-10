@@ -21,9 +21,13 @@ ota_keys.h's header comment for why this pairing was chosen (native
 mbedTLS support on-device, no new firmware dependency).
 
 Usage:
-    # One-time: generate a keypair (private key saved locally, gitignored;
-    # public key printed for pasting into ota_keys.h).
+    # One-time: generate a TEST keypair (private key saved locally,
+    # gitignored; public key printed for pasting into ota_keys.h).
     python server/tools/sign_manifest.py --gen-test-key
+
+    # One-time PRODUCTION release ceremony (Balaji V1 freeze remediation --
+    # see Docs/audit/coviu_balaji_v1_freeze/03_OTA_SIGNING_KEY_CEREMONY.md):
+    python server/tools/sign_manifest.py --gen-production-key
 
     # Sign a manifest:
     python server/tools/sign_manifest.py --sign \\
@@ -48,6 +52,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import hashes, serialization
 
 DEFAULT_TEST_KEY_PATH = os.path.join(os.path.dirname(__file__), ".test_signing_key.pem")
+DEFAULT_PRODUCTION_KEY_PATH = os.path.join(os.path.dirname(__file__), ".production_signing_key.pem")
 
 
 def build_canonical_string(fields):
@@ -61,7 +66,17 @@ def build_canonical_string(fields):
     ])
 
 
-def gen_test_key(path):
+def _generate_keypair(path):
+    """Shared keypair-generation core for both --gen-test-key and
+    --gen-production-key -- identical cryptography (ECDSA P-256), identical
+    file-permission handling, identical refuse-to-overwrite safety. The two
+    callers differ only in destination path and the operator-facing message
+    (see gen_test_key()/gen_production_key() below), never in the key
+    generation itself -- there is no cryptographic difference between a
+    "test" and a "production" key, only in how carefully the private key is
+    subsequently handled by a human, which this tool cannot enforce past the
+    point of writing the file to local disk with 0600 permissions.
+    """
     if os.path.exists(path):
         print(f"REFUSING to overwrite existing key at {path} -- remove it first if you really want a new one.",
               file=sys.stderr)
@@ -79,12 +94,49 @@ def gen_test_key(path):
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo,
     ).decode()
+    return pub_pem
+
+
+def gen_test_key(path):
+    pub_pem = _generate_keypair(path)
     print(f"Test private key written to: {path}")
     print("This file is gitignored (server/tools/.test_signing_key.pem) -- "
           "it must NEVER be committed. Regenerate any time by deleting it and re-running --gen-test-key.")
     print()
     print("Paste this PUBLIC key into ota_keys.h's COVIO_OTA_PUBLIC_KEY_PEM "
           "(TEST/non-production use only):")
+    print()
+    print(pub_pem)
+
+
+def gen_production_key(path):
+    """Balaji V1 freeze remediation (OTA signing-key ceremony): the
+    production counterpart of --gen-test-key. Same cryptography, same
+    on-disk handling -- the difference is entirely operational, spelled out
+    in the printed instructions below and in
+    Docs/audit/coviu_balaji_v1_freeze/03_OTA_SIGNING_KEY_CEREMONY.md. This
+    tool NEVER transmits, uploads, or prints the private key material itself
+    -- only its file path and the public key (which is not secret by
+    definition) are ever displayed.
+    """
+    pub_pem = _generate_keypair(path)
+    print(f"PRODUCTION private key written to: {path}")
+    print()
+    print("THIS FILE IS THE REAL COVIO RELEASE SIGNING KEY. It is gitignored")
+    print("(matches this repo's *.pem catch-all) and must NEVER be committed,")
+    print("emailed, pasted into chat, or stored anywhere this repository is")
+    print("cloned to routinely. Immediately after this ceremony:")
+    print("  1. Move this file to your organization's secrets vault / HSM /")
+    print("     password manager (whichever this project's release process")
+    print("     designates) -- do not leave it sitting on a laptop disk.")
+    print("  2. Delete the local copy once it is safely stored elsewhere.")
+    print("  3. Record the key id you assign it (see --key-id on --sign)")
+    print("     in the signing key management log.")
+    print("See Docs/audit/coviu_balaji_v1_freeze/03_OTA_SIGNING_KEY_CEREMONY.md")
+    print("for the full, step-by-step operational procedure this key feeds into.")
+    print()
+    print("Paste this PUBLIC key into ota_keys.h's COVIO_OTA_PUBLIC_KEY_PEM")
+    print("and flip COVIO_OTA_KEY_IS_PLACEHOLDER to 0:")
     print()
     print(pub_pem)
 
@@ -150,6 +202,11 @@ def sign_manifest(args):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--gen-test-key", action="store_true", help="Generate a new local test signing keypair")
+    p.add_argument("--gen-production-key", action="store_true",
+                   help="Generate a new PRODUCTION signing keypair (one-time release ceremony -- "
+                        "see Docs/audit/coviu_balaji_v1_freeze/03_OTA_SIGNING_KEY_CEREMONY.md)")
+    p.add_argument("--production-key-path", default=DEFAULT_PRODUCTION_KEY_PATH,
+                   help="Destination for --gen-production-key (default: server/tools/.production_signing_key.pem)")
     p.add_argument("--sign", action="store_true", help="Sign a manifest")
     p.add_argument("--private-key", default=DEFAULT_TEST_KEY_PATH)
     p.add_argument("--hw-compat", default="covio-oilflow-v1")
@@ -168,6 +225,8 @@ def main():
 
     if args.gen_test_key:
         gen_test_key(args.private_key)
+    elif args.gen_production_key:
+        gen_production_key(args.production_key_path)
     elif args.sign:
         if not args.image or not args.image_url:
             p.error("--sign requires --image and --image-url")

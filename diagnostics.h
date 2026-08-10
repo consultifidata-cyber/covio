@@ -59,10 +59,17 @@ public:
   }
 
   // GET /api/v1/status -- operational summary.
+  // Balaji V1 freeze remediation: crashResetStreak/sensorStuck are now
+  // explicit inputs (read from Store/SensorStuckDetector by the caller,
+  // local_api.h) rather than hidden module-global state -- this class
+  // stays a pure builder over already-known values, exactly per its own
+  // header comment above.
   static String buildStatusJson(Store& st, Totalizer& tot, EventQueue& q,
-                                 Sync& sync, Ota& ota, bool sdPresent) {
+                                 Sync& sync, Ota& ota, bool sdPresent,
+                                 uint32_t crashResetStreak, bool sensorStuck) {
     String healthState, alarmsJson;
-    computeHealth_(q, sync, ota, sdPresent, healthState, alarmsJson);
+    computeHealth_(q, sync, ota, sdPresent, crashResetStreak, sensorStuck,
+                   healthState, alarmsJson);
 
     String s;
     s.reserve(1100);   // bumped for the ota_debug root-cause-audit object below
@@ -155,9 +162,11 @@ public:
   }
 
   // GET /api/v1/health -- derived health state + active alarms.
-  static String buildHealthJson(EventQueue& q, Sync& sync, Ota& ota, bool sdPresent) {
+  static String buildHealthJson(EventQueue& q, Sync& sync, Ota& ota, bool sdPresent,
+                                 uint32_t crashResetStreak, bool sensorStuck) {
     String healthState, alarmsJson;
-    computeHealth_(q, sync, ota, sdPresent, healthState, alarmsJson);
+    computeHealth_(q, sync, ota, sdPresent, crashResetStreak, sensorStuck,
+                   healthState, alarmsJson);
     String s;
     s.reserve(64 + alarmsJson.length());
     s  = "{\"health_state\":\"" + healthState + "\"";
@@ -170,11 +179,19 @@ public:
   // pulseFreqHz/rssiHistory are supplied by the caller (local_api.h owns the
   // periodic sampling that produces them -- this module stays a pure builder
   // over already-known values, consistent with its own header comment above).
+  // Balaji V1 freeze remediation: trailing params are the new persistent
+  // diagnostic counters (Store) and sensor-stuck state (SensorStuckDetector)
+  // -- read by the caller (local_api.h), never computed in here, consistent
+  // with this class's existing "pure builder" contract.
   static String buildMetricsJson(EventQueue& q, Sync& sync, bool sdPresent,
                                   bool havePulseFreqHz, float pulseFreqHz,
-                                  const int16_t* rssiHistory, int rssiHistoryCount) {
+                                  const int16_t* rssiHistory, int rssiHistoryCount,
+                                  uint32_t restartCount, uint32_t watchdogResetCount,
+                                  uint32_t brownoutResetCount, uint32_t pushFailCount,
+                                  uint32_t wifiReconnectCount, uint32_t crashResetStreak,
+                                  bool sensorStuck, uint32_t msSinceLastPulseChange) {
     String s;
-    s.reserve(384 + rssiHistoryCount * 8);
+    s.reserve(512 + rssiHistoryCount * 8);
     s  = "{\"free_heap_bytes\":" + String(ESP.getFreeHeap());
     s += ",\"heap_low_water_mark_bytes\":" + String(esp_get_minimum_free_heap_size());
     // Root-cause audit (Part 8, this remediation pass): the raw numeric
@@ -218,6 +235,19 @@ public:
     // explicitly removed (config.h's header comment). Reserved, never
     // populated speculatively (§13 A.3's own note on this field).
     s += ",\"temperature_c\":null";
+
+    // Balaji V1 freeze remediation (Product Readiness Review P1-1/P1-2):
+    // persistent, NVS-backed lifetime counters (survive reboot -- see
+    // store.h) plus the sensor-stuck-at-zero heuristic. All are additive;
+    // no existing field above is changed.
+    s += ",\"restart_count\":" + String(restartCount);
+    s += ",\"watchdog_reset_count\":" + String(watchdogResetCount);
+    s += ",\"brownout_reset_count\":" + String(brownoutResetCount);
+    s += ",\"push_fail_count\":" + String(pushFailCount);
+    s += ",\"wifi_reconnect_count\":" + String(wifiReconnectCount);
+    s += ",\"crash_reset_streak\":" + String(crashResetStreak);
+    s += ",\"sensor_stuck\":" + String(sensorStuck ? "true" : "false");
+    s += ",\"ms_since_last_pulse_change\":" + String(msSinceLastPulseChange);
     s += "}";
     return s;
   }
@@ -225,9 +255,11 @@ public:
   // DM-Phase 1: thin accessor so the HTML status page (local_api.h) can
   // reuse the exact same health_state precedence rule as buildStatusJson()/
   // buildHealthJson() without parsing either JSON body back apart.
-  static String healthStateOnly(EventQueue& q, Sync& sync, Ota& ota, bool sdPresent) {
+  static String healthStateOnly(EventQueue& q, Sync& sync, Ota& ota, bool sdPresent,
+                                 uint32_t crashResetStreak, bool sensorStuck) {
     String healthState, alarmsJson;
-    computeHealth_(q, sync, ota, sdPresent, healthState, alarmsJson);
+    computeHealth_(q, sync, ota, sdPresent, crashResetStreak, sensorStuck,
+                   healthState, alarmsJson);
     return healthState;
   }
 
@@ -285,11 +317,20 @@ private:
   //
   // Only alarm types buildable from DM-Phase 1's own new state are ever
   // produced: QUEUE_HIGH/QUEUE_CRITICAL (maintained backlog counter),
-  // OTA_FAILED (new ota.state()), SD_REMOVED (present/absent check). Every
-  // other §11.4 alarm type requires either a counter this phase doesn't
-  // introduce (WIFI_RECONNECT_LOOP, REBOOT_LOOP) or an ADR explicitly out of
-  // scope here (OTA_ROLLBACK/BROWNOUT_DETECTED -> ADR-006, SENSOR_STOPPED ->
-  // ADR-015) -- never fabricated.
+  // OTA_FAILED (new ota.state()), SD_REMOVED (present/absent check). Two
+  // more (REBOOT_LOOP, SENSOR_STOPPED) were added by the Balaji V1 freeze
+  // remediation once the counters/detector they require existed (Store's
+  // crashResetStreak(), SensorStuckDetector) -- see their checks below.
+  // WIFI_RECONNECT_LOOP and OTA_ROLLBACK/BROWNOUT_DETECTED remain
+  // deliberately NOT implemented as separate alarm TYPES here: this
+  // device's own reset-reason field already surfaces "brownout" when
+  // relevant (§ resetReasonStr_ below), and a true rate-based
+  // "reconnecting too often" detector needs wall-clock time this device
+  // does not have (RISK-11, unchanged) -- a lifetime-count-only substitute
+  // would be a weaker, potentially misleading alarm, so it was left as a
+  // plain counter (wifi_reconnect_count, buildMetricsJson above) for an
+  // operator to interpret, rather than fabricated into a false "loop"
+  // verdict.
   //
   // raised_at_ms_ago is always 0: these are level-triggered conditions
   // recomputed fresh on every request, not tracked state transitions. Real
@@ -297,6 +338,7 @@ private:
   // -- reporting a fabricated duration here would be worse than reporting an
   // honest "detected as of this instant".
   static void computeHealth_(EventQueue& q, Sync& sync, Ota& ota, bool sdPresent,
+                              uint32_t crashResetStreak, bool sensorStuck,
                               String& healthStateOut, String& alarmsJsonOut) {
     String alarms = "[";
     bool first = true;
@@ -388,6 +430,33 @@ private:
         first = false; haveWarning = true;
         break;
       default: break;
+    }
+
+    // Balaji V1 freeze remediation (Product Readiness Review P1-2):
+    // heuristic advisory, not a hard fault -- see sensor_stuck.h's own
+    // header comment for why this is WARNING, not CRITICAL, and why the
+    // threshold is deliberately generous.
+    if (sensorStuck) {
+      if (!first) alarms += ",";
+      alarms += "{\"type\":\"SENSOR_STOPPED\",\"severity\":\"WARNING\","
+                "\"raised_at_ms_ago\":0,"
+                "\"message\":\"No pulse count change for an extended period "
+                "-- possible stuck/failed flow sensor, or a genuinely idle line\"}";
+      first = false; haveWarning = true;
+    }
+
+    // Balaji V1 freeze remediation (Product Readiness Review P1-1):
+    // CRASH_RESET_STREAK_ALARM consecutive abnormal (watchdog/brownout/
+    // panic) resets without ever reaching HEALTHY_UPTIME_CLEARS_CRASH_
+    // STREAK_MS of stable uptime in between (config.h) -- a real signal
+    // this device is stuck resetting, not just that it has reset once.
+    if (crashResetStreak >= CRASH_RESET_STREAK_ALARM) {
+      if (!first) alarms += ",";
+      alarms += "{\"type\":\"REBOOT_LOOP\",\"severity\":\"CRITICAL\","
+                "\"raised_at_ms_ago\":0,"
+                "\"message\":\"" + String(crashResetStreak) + " consecutive abnormal "
+                "resets (watchdog/brownout/panic) without a sustained healthy run\"}";
+      first = false; haveCritical = true;
     }
 
     alarms += "]";

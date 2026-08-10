@@ -69,6 +69,12 @@ public:
     if (now - lastWifiTry_ < backoff_) return;
     lastWifiTry_ = now;
     Serial.println("[NET] reconnecting...");
+    // Balaji V1 freeze remediation (Product Readiness Review P1-1):
+    // persistent counter -- this branch only runs when WiFi was NOT already
+    // connected and backoff has elapsed, i.e. exactly a genuine reconnect
+    // attempt, never the initial wifiConnect() call at boot (a separate
+    // method, uncounted).
+    st_->incrementWifiReconnectCount();
     WiFi.disconnect();
     WiFi.begin(st_->wifiSsid().c_str(), st_->wifiPass().c_str());
     backoff_ = min<uint32_t>(backoff_ * 2, 120000UL);      // cap 2 min
@@ -125,6 +131,15 @@ public:
     if (code != 200) {
       Serial.printf("[SYNC] push HTTP %d — keeping queue\n", code);
       http.end();
+      // Balaji V1 freeze remediation (Product Readiness Review P1-1):
+      // persistent counter for any push attempt that did not result in an
+      // ack -- covers connection failures (which is what a DNS failure or
+      // TLS handshake failure surfaces as through this HTTP client
+      // abstraction; the two are not separately distinguishable at this
+      // layer, so this is deliberately one honest combined counter rather
+      // than a fabricated DNS-vs-TLS split) as well as server-side error
+      // codes (4xx/5xx).
+      st_->incrementPushFailCount();
       return false;                       // NOT an ack; retry later
     }
     String resp = http.getString();
@@ -134,6 +149,7 @@ public:
     long ackSeq = extractLong_(resp, "ack_seq");
     if (ackSeq < 0) {
       Serial.println("[SYNC] 200 but no ack_seq — keeping queue");
+      st_->incrementPushFailCount();      // same counter -- this is still not an ack
       return false;                       // bare 200 is not an ack (Invariant 6)
     }
     q_->ackThrough((uint32_t)ackSeq, st_->bootId());

@@ -44,6 +44,15 @@ public:
     // across reboots so the server's UNIQUE(device_id,boot_id,seq) holds.
     bootId_ = p_.getULong("boot_id", 0) + 1;
     p_.putULong("boot_id", bootId_);
+
+    // Balaji V1 freeze remediation (Product Readiness Review P1-1):
+    // lifetime restart counter, incremented once per boot right alongside
+    // boot_id above -- same namespace, same lifecycle (both reset together
+    // on factoryReset() below, consistent with every other operational
+    // field here). Distinct from boot_id itself (which also disambiguates
+    // telemetry seq numbers and must never be repurposed for anything
+    // else) -- this is a plain, single-purpose observability counter.
+    p_.putUInt("restart_cnt", p_.getUInt("restart_cnt", 0) + 1);
   }
 
   // ---- identity ----
@@ -105,6 +114,33 @@ public:
   void     setSecurityVersion(uint32_t v) { p_sec_.putUInt("sec_ver", v); }
   void     setCalib(float k, float d, float tr) {
     p_.putFloat("kfactor", k); p_.putFloat("density", d); p_.putFloat("tref", tr);
+  }
+
+  // ---- Balaji V1 freeze remediation (Product Readiness Review P1-1): -----
+  // persistent, NVS-backed diagnostic counters. Lifetime counts since last
+  // factory reset (same lifecycle as boot_id/restart_cnt above -- all live
+  // in the "covio" namespace and reset together via factoryReset(), which
+  // is the existing, unchanged behavior for every other operational field
+  // here). Purely additive: no existing field, method, or behavior above
+  // is modified by any of this.
+  uint32_t restartCount()       { return p_.getUInt("restart_cnt", 0); }
+  uint32_t watchdogResetCount() { return p_.getUInt("wdt_cnt", 0); }
+  uint32_t brownoutResetCount() { return p_.getUInt("bod_cnt", 0); }
+  uint32_t pushFailCount()      { return p_.getUInt("pushfail_cnt", 0); }
+  uint32_t wifiReconnectCount() { return p_.getUInt("wifirecon_cnt", 0); }
+  uint32_t crashResetStreak()   { return p_.getUInt("crash_streak", 0); }
+
+  void incrementWatchdogResetCount() { p_.putUInt("wdt_cnt", watchdogResetCount() + 1); }
+  void incrementBrownoutResetCount() { p_.putUInt("bod_cnt", brownoutResetCount() + 1); }
+  void incrementPushFailCount()      { p_.putUInt("pushfail_cnt", pushFailCount() + 1); }
+  void incrementWifiReconnectCount() { p_.putUInt("wifirecon_cnt", wifiReconnectCount() + 1); }
+  void incrementCrashResetStreak()   { p_.putUInt("crash_streak", crashResetStreak() + 1); }
+  // Called once this boot has proven itself healthy for
+  // HEALTHY_UPTIME_CLEARS_CRASH_STREAK_MS (config.h) -- a sustained good
+  // run is evidence this is not a crash loop, whatever caused past resets.
+  // No-op (and no redundant NVS write) if the streak is already 0.
+  void clearCrashResetStreak() {
+    if (crashResetStreak() != 0) p_.putUInt("crash_streak", 0);
   }
 
 private:

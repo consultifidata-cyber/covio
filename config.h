@@ -55,8 +55,36 @@
 #define DEFAULT_WIFI_SSID     "YOUR_WIFI_SSID_PLACEHOLDER"
 #define DEFAULT_WIFI_PASS     "YOUR_WIFI_PASSWORD_PLACEHOLDER"
 
+// ---- Board platform selection (multi-board enhancement) ---------------------
+// Selects the BOARD's pin table at COMPILE TIME -- #ifndef + build-flag
+// override, the exact pattern SENSOR_MODE below and RELEASE_BUILD/
+// FACTORY_TEST_BUILD already use (-DBOARD_MODE=1 in a build flag selects
+// the 8DI-8DO).
+//
+// BOARD_RELAY1CH (the default): Waveshare ESP32-S3-Relay-1CH -- the pin
+//   table the DEPLOYED production plant's binary was built with (commit
+//   e5a593b, env esp32dev; flashed + commissioned per Docs/audit/
+//   coviu_oil_meter_plant_commissioning/08_PRODUCTION_FLASH_AND_COMMISSIONING.md).
+//   Kept as the default so a flag-less build IS the production baseline.
+// BOARD_8DI8DO: Waveshare ESP32-S3-POE-ETH-8DI-8DO industrial control
+//   board (8 opto-isolated DI, 8 DO, RS485, CAN, POE Ethernet -- none of
+//   the extra interfaces are used by this firmware) -- the CT-clamp
+//   enhancement phase's target unit.
+//
+// BOARD_MODE and SENSOR_MODE (below) are DELIBERATELY independent axes:
+// selecting a board never implies a sensor and vice versa. The two axes
+// meet ONLY in this pin table -- each board block defines where each
+// sensor type lands on that board, and nothing else anywhere in the
+// firmware knows which board it is running on.
+#define BOARD_RELAY1CH        0
+#define BOARD_8DI8DO          1
+#ifndef BOARD_MODE
+#define BOARD_MODE            BOARD_RELAY1CH
+#endif
+
 // ---- Hardware pins ------------------------------------------------------------
-// Retargeted for the actual unit on hand: Waveshare ESP32-S3-Relay-1CH.
+#if BOARD_MODE == BOARD_RELAY1CH
+// Waveshare ESP32-S3-Relay-1CH (the deployed production plant unit).
 // Its own schematic's GPIO occupancy table (GPIO | Relay | RTC | RS485 |
 // Other columns) shows the relay on IO47, RS485 on IO17/18/21, RTC on
 // IO38/39/40, native USB D-/D+ on IO19/20, and IO33-37 internally reserved
@@ -69,16 +97,70 @@
 // GPIO number, not a relabeled index.
 #define PIN_PULSE             1           // external breakout "IO1" -> GPIO1 (flow pulses, via opto-isolator)
 // (MAX31865 removed for this build; its CS was GPIO5 — leave free.)
-// No SD card on this unit: queue/totalizer persistence moved to internal
+// CT sensor input on this board: the breakout's other free pin ("IO2" ->
+// GPIO2). Defined so BOARD_MODE and SENSOR_MODE stay independent (a CT
+// build for this board compiles), but this combination is UNVALIDATED on
+// real hardware, and GPIO2 doubles as PIN_SIM below -- SIM_PULSES must
+// stay 0 in any CT build on this board.
+#define PIN_CT_STATE          2           // breakout "IO2" -> GPIO2 (CT builds; unvalidated combo)
+
+#elif BOARD_MODE == BOARD_8DI8DO
+// Industrial ESP32-S3 Control Board, Waveshare ESP32-S3-POE-ETH-8DI-8DO
+// (PRODUCTION RETARGET, CT-clamp enhancement phase). Its 8 optocoupler-
+// isolated digital inputs DI1..DI8 map to GPIO4..GPIO11 (manufacturer user
+// guide + ESPHome device registry, cross-checked). GPIO1 -- the Relay-1CH
+// board's breakout pin, see the BOARD_RELAY1CH block above -- is NOT an
+// exposed field terminal on this board, so the NPN sensor lands on the DI1
+// terminal (GPIO4). DI1's onboard bidirectional optocoupler replaces the
+// external PC817 module used on the Relay-1CH unit (wiring: sensor output ->
+// DI1, sensor 0V -> DI COM, field-side supply on the 7-36V terminal). The
+// DI stage inverts (active input = GPIO reads LOW) -- irrelevant to PCNT
+// pulse COUNTING: each physical pulse still yields exactly one rising edge.
+#define PIN_PULSE             4           // DI1 terminal (GPIO4) -> NPN flow pulses (onboard opto)
+#define PIN_CT_STATE          5           // DI2 terminal (GPIO5); active = LOW (opto inverts)
+
+#else
+#error "Unknown BOARD_MODE -- valid values: BOARD_RELAY1CH (0, default), BOARD_8DI8DO (1)."
+#endif
+// (Both boards) No SD card: queue/totalizer persistence lives on internal
 // flash (LittleFS, "spiffs" partition) -- see queue.h/totalizer.h/
 // covio_firmware.ino. PIN_SD_CS removed; GPIO19 in particular must stay free
-// on ESP32-S3 -- confirmed by this board's own schematic as the native USB
+// on ESP32-S3 -- confirmed by the Relay-1CH schematic as the native USB
 // D- line (D_N), so the old VSPI-18/23/19 SD wiring would have conflicted
 // with USB even if a card were attached.
 
 // ---- Pulse counter (PCNT) ---------------------------------------------------
 #define PCNT_GLITCH_NS        1000        // hardware glitch filter, nanoseconds
                                           // raise if you see idle creep
+
+// ---- Sensor acquisition mode (CT-clamp enhancement) -------------------------
+// Selects the sensor ACQUISITION method at COMPILE TIME -- #ifndef +
+// build-flag override, the exact pattern RELEASE_BUILD/FACTORY_TEST_BUILD
+// below already use (-DSENSOR_MODE=1 in a build flag selects CT).
+//
+// SENSOR_MODE_NPN (the default): the existing PCNT hardware pulse-counting
+//   path on PIN_PULSE, byte-for-byte the production code path. CT code is
+//   NOT COMPILED into NPN builds at all (compile-time absence, same posture
+//   as FACTORY_TEST_BUILD's factory-only route).
+// SENSOR_MODE_CT: a CT current-sensing SWITCH (contact-output clamp, its
+//   own built-in threshold/burden -- NOT a raw analog CT; the 8DI-8DO has
+//   no exposed ADC) wired to a digital input + COM. WHICH pin carries it is
+//   board-specific: PIN_CT_STATE is defined per board in the BOARD_MODE
+//   blocks above (8DI-8DO: DI2/GPIO5; Relay-1CH: breakout IO2/GPIO2,
+//   unvalidated). sensor_ct.h converts the debounced current-presence
+//   level into a software pulse stream at CT_PULSE_HZ via time integration
+//   (robust to blocking network gaps), injected into the SAME totalizer
+//   accumulator the PCNT path drains into. Everything above the
+//   acquisition layer -- totalizer persistence, telemetry, payloads,
+//   queue, sync, server-side K-factor -- is unchanged and unaware of which
+//   sensor produced the pulses.
+#define SENSOR_MODE_NPN       0
+#define SENSOR_MODE_CT        1
+#ifndef SENSOR_MODE
+#define SENSOR_MODE           SENSOR_MODE_NPN
+#endif
+#define CT_PULSE_HZ           1           // synthesized pulses/sec while current present
+#define CT_DEBOUNCE_MS        100         // DI2 level debounce (on top of the board's own DI filtering)
 
 // ---- Timing (all milliseconds) ----------------------------------------------
 #define TELEMETRY_PERIOD_MS   1000UL      // build one record this often
@@ -153,6 +235,9 @@
 // toggle is software — it pauses briefly during network pushes (rate dips
 // are normal). Real meter pulses are counted in the PCNT hardware peripheral
 // and are NEVER lost to network activity.
+// WARNING (8DI-8DO production board): GPIO2 is that board's CAN TX pin --
+// SIM_PULSES must stay 0 on this hardware unless PIN_SIM is first
+// reassigned to a genuinely free GPIO.
 #define SIM_PULSES            0
 #define PIN_SIM               2
 #define SIM_HZ                10
@@ -225,3 +310,27 @@
     #error "RELEASE_BUILD=1 but BUILD_DIRTY=1 -- the build-identity extra_script did not run (or ran against a dirty/unresolvable tree). Refusing to build an unidentified/dirty release image (see scripts/build_identity.py)."
   #endif
 #endif
+
+// ---- Balaji V1 freeze remediation (long-term diagnostics) -------------------
+// Product Readiness Review P1-1 (persistent failure counters) / P1-2
+// (sensor-stuck-at-zero alarm). Both are heuristic, operator-facing
+// advisories, not hard faults -- tune per-site once real behavior/flow
+// patterns are observed, per each constant's own comment below.
+//
+// How long the lifetime pulse total must stay completely UNCHANGED before
+// SENSOR_STOPPED is raised. Deliberately generous: a real oil meter can
+// legitimately see zero flow for extended idle periods with nothing wrong.
+// 48h default -- lower it once this site's actual idle/dispensing pattern
+// is known, if 48h proves too slow to be useful in practice.
+#define SENSOR_STUCK_THRESHOLD_MS   (48UL * 3600UL * 1000UL)
+
+// Consecutive abnormal (watchdog/brownout/panic) resets, each occurring
+// before the device ever proves a healthy run (see
+// HEALTHY_UPTIME_CLEARS_CRASH_STREAK_MS below), before REBOOT_LOOP fires.
+#define CRASH_RESET_STREAK_ALARM    3
+
+// How long a boot must run without incident before it clears the crash-
+// reset streak above -- i.e. how long counts as proof "this boot is not
+// part of a crash loop." This device has no RTC (RISK-11, unchanged), so
+// this is measured in device uptime (millis()), not wall-clock time.
+#define HEALTHY_UPTIME_CLEARS_CRASH_STREAK_MS  (5UL * 60UL * 1000UL)

@@ -17,6 +17,19 @@
 //   provision                 re-enter AP-mode setup on next boot (DM-Phase 2,
 //                             NOT a factory reset -- existing wifi/server/key
 //                             values and all queue/totalizer state are untouched)
+//   reset_ack                 Commissioning reset: fast-forwards the queue's
+//                             ack cursor to the current write position (see
+//                             queue.h::resetAckToCurrentPosition). Touches
+//                             ONLY the queue's AckRec -- NVS (server_url/
+//                             api_key/wifi/calibration) and the Totalizer's
+//                             own checkpoint (total/seq) are untouched. Never
+//                             automatic -- explicit operator command only.
+//   recover_queue             Queue storage recovery: deletes a single
+//                             exhausted, never-rotated segment file and
+//                             resets ONLY the write-position cursors (see
+//                             queue.h::recoverQueueStorage). Does not touch
+//                             acked_seq, NVS, or totalizer.total. Explicit
+//                             operator command only.
 // ============================================================================
 #pragma once
 #include <Arduino.h>
@@ -24,10 +37,17 @@
 #include "credential_display.h"
 #include "store.h"
 #include "wifi_provision.h"
+#include "queue.h"
+#include "totalizer.h"
 
 class Provision {
 public:
-  void begin(Store* st) { st_ = st; }
+  // EventQueue*/Totalizer* default nullptr so any pre-existing single-arg
+  // begin(&store) call site still compiles -- reset_ack simply reports
+  // "unavailable" if not wired, rather than being silently absent.
+  void begin(Store* st, EventQueue* q = nullptr, Totalizer* tot = nullptr) {
+    st_ = st; q_ = q; tot_ = tot;
+  }
 
   void service() {
     while (Serial.available()) {
@@ -43,7 +63,7 @@ private:
   void handle_(String line) {
     line.trim();
     if (line == "help") {
-      Serial.println("cmds: show | set url <u> | set key <k> | set wifi <ssid> <pass> | reboot | factory | provision");
+      Serial.println("cmds: show | set url <u> | set key <k> | set wifi <ssid> <pass> | reboot | factory | provision | reset_ack | recover_queue");
     } else if (line == "show") {
       Serial.printf("device_id : %s\n", st_->deviceId().c_str());
       Serial.printf("fw        : %s\n", FW_VERSION);
@@ -53,6 +73,15 @@ private:
       Serial.printf("wifi_ssid : %s\n", st_->wifiSsid().c_str());
       Serial.printf("calib     : v%u  K=%.4f  density=%.3f  Tref=%.1f\n",
                     st_->cfgVer(), st_->kFactor(), st_->density(), st_->tRef());
+      // Balaji V1 freeze remediation (Product Readiness Review P1-1):
+      // persistent diagnostic counters, readable without any network/local-
+      // API access -- same values as /api/v1/metrics's restart_count/
+      // watchdog_reset_count/brownout_reset_count/wifi_reconnect_count/
+      // push_fail_count/crash_reset_streak fields (diagnostics.h).
+      Serial.printf("diag      : restarts=%u watchdog=%u brownout=%u "
+                    "wifi_reconnects=%u push_fails=%u crash_streak=%u\n",
+                    st_->restartCount(), st_->watchdogResetCount(), st_->brownoutResetCount(),
+                    st_->wifiReconnectCount(), st_->pushFailCount(), st_->crashResetStreak());
     } else if (line.startsWith("set url ")) {
       st_->setServerUrl(line.substring(8));
       Serial.println("[PROV] server_url saved. 'reboot' to apply cleanly.");
@@ -80,6 +109,31 @@ private:
       WifiProvision::requestReprovision();
       delay(200);
       ESP.restart();
+    } else if (line == "reset_ack") {
+      // MW-001 commissioning reset -- see queue.h::resetAckToCurrentPosition.
+      // Touches ONLY the queue's AckRec (acked_seq/cursor_segment/
+      // cursor_offset). NVS and the Totalizer's own checkpoint (total/seq)
+      // are untouched -- explicit operator command, never automatic.
+      if (!q_ || !tot_) {
+        Serial.println("[PROV] reset_ack unavailable (queue/totalizer not wired this build)");
+      } else {
+        uint32_t currentSeq = tot_->lastSeq();
+        q_->resetAckToCurrentPosition(currentSeq);
+        Serial.printf("[PROV] ack cursor reset to current position: seq=%u. 'reboot' to apply cleanly.\n",
+                      currentSeq);
+      }
+    } else if (line == "recover_queue") {
+      // MW-001 queue storage recovery -- see queue.h::recoverQueueStorage.
+      // Deletes ONLY /queue/seg_000000.bin (proven via live `ls` to be the
+      // sole, exhausted segment). Resets ONLY Totalizer.q_segment/q_offset
+      // and the queue's cursor_segment/cursor_offset. Does NOT touch
+      // acked_seq, NVS, or totalizer.total. Explicit operator command only.
+      if (!q_) {
+        Serial.println("[PROV] recover_queue unavailable (queue not wired this build)");
+      } else {
+        q_->recoverQueueStorage();
+        Serial.println("[PROV] queue storage recovered: seg_000000.bin removed, write cursor reset to 0/0.");
+      }
     } else {
       Serial.println("[PROV] unknown. type: help");
     }
@@ -112,5 +166,7 @@ private:
   }
 
   Store* st_ = nullptr;
+  EventQueue* q_ = nullptr;
+  Totalizer* tot_ = nullptr;
   String buf_;
 };
