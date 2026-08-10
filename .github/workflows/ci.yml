@@ -247,6 +247,15 @@ jobs:
       - name: Build 8DI-8DO + CT variant firmware (esp32dev-8di8do-ct)
         run: pio run -e esp32dev-8di8do-ct
 
+      # Miki Wire hardening: compile-verify the MW-001 deployed configuration
+      # and its hardened-profile successor on every push, same
+      # compile-verification-only rationale as the CT variant above.
+      - name: Build MW-001 deployed-config firmware (esp32dev-8di8do-npn)
+        run: pio run -e esp32dev-8di8do-npn
+
+      - name: Build Miki Wire hardened-profile firmware (esp32dev-mikiwire)
+        run: pio run -e esp32dev-mikiwire
+
       - name: Build production firmware (release)
         run: pio run -e release
 
@@ -411,6 +420,55 @@ jobs:
             -DBOARD_MODE=1 -DSENSOR_MODE=1 -DEXPECT_BOARD=1 -DEXPECT_SENSOR=1 \
             test_board_config.cpp -o test_board_config_variant
           ./test_board_config_variant
+
+      # Miki Wire hardening: the profile guard, compiled a THIRD way -- the
+      # MW-001 hardened configuration. The default compile above already
+      # #errors if MIKI_WIRE_PROFILE ever leaks into a flag-less (Balaji)
+      # build; this variant proves the -D override path works.
+      - name: Compile+run board-config guard (Miki Wire hardened profile)
+        working-directory: test/native_cpp
+        run: |
+          g++ -std=c++14 -Wall -I../.. \
+            -DBOARD_MODE=1 -DMIKI_WIRE_PROFILE=1 -DEXPECT_BOARD=1 -DEXPECT_MIKI=1 \
+            test_board_config.cpp -o test_board_config_miki
+          ./test_board_config_miki
+
+      - name: Compile+run ack-validation tests (Phase-0 F8)
+        working-directory: test/native_cpp
+        run: |
+          g++ -std=c++14 -Wall -I../.. \
+            test_ack_validation.cpp -o test_ack_validation
+          ./test_ack_validation
+
+      - name: Compile+run pulse-plausibility tests (Miki profile, F5)
+        working-directory: test/native_cpp
+        run: |
+          g++ -std=c++14 -Wall -I../.. \
+            test_pulse_plausibility.cpp -o test_pulse_plausibility
+          ./test_pulse_plausibility
+
+      - name: Compile+run sensor-health tests (Miki profile, F6)
+        working-directory: test/native_cpp
+        run: |
+          g++ -std=c++14 -Wall -I../.. \
+            test_sensor_health.cpp -o test_sensor_health
+          ./test_sensor_health
+
+      # Phase-0 audit found these two suites existed but were never wired
+      # into CI (orphaned since their remediation phases). Wired now.
+      - name: Compile+run credential-display tests (previously orphaned)
+        working-directory: test/native_cpp
+        run: |
+          g++ -std=c++14 -Wall -I../.. \
+            test_credential_display.cpp -o test_credential_display
+          ./test_credential_display
+
+      - name: Compile+run timestamp-parse tests (previously orphaned)
+        working-directory: test/native_cpp
+        run: |
+          g++ -std=c++14 -Wall -I../.. \
+            test_timestamp_parse.cpp -o test_timestamp_parse
+          ./test_timestamp_parse
 
   # ---------------------------------------------------------------------
   # Desktop app -- Windows (the app's actual shipped target) and Ubuntu
