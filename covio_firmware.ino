@@ -290,6 +290,16 @@ void loop() {
       syncEngine.setWifiAuthorityPaused(false);
       localApi.begin(&store, &totalizer, &eventQueue, &syncEngine, &ota, &sensorStuck);
     }
+    // Miki Wire hardening (Phase-0 finding F3, AP half): this early-return
+    // branch previously skipped Totalizer::service() entirely -- the sole
+    // PCNT drain and checkpoint writer. A device parked in provisioning
+    // mode on a producing line could silently wrap the 16-bit hardware
+    // counter and lose everything since the last checkpoint on power cut.
+    // Counting must never depend on provisioning/network state: the same
+    // rate-limited drain+checkpoint the OTA download path uses keeps it
+    // alive here (telemetry records still pause -- only the lifetime count
+    // and its durability continue, by design).
+    covioBackgroundService();
     delay(5);
     return;
   }
