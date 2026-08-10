@@ -155,7 +155,12 @@ void setup() {
   // the pre-Phase-2 single-file (*Legacy_) methods are no longer reached
   // during normal operation.
   eventQueue.begin(&totalizer);
-  seq = totalizer.lastSeq();          // continue GLOBAL seq across reboots
+  // Miki Wire hardening (Phase-0 F4 corollary): resume seq from whichever is
+  // higher -- the totalizer checkpoint or the durable ack watermark. On a
+  // healthy boot these agree (checkpoint >= ack always); after a checkpoint
+  // regression the ack floor prevents the "every new row filtered as
+  // already-acked" transmission deadlock. See ack_validation.h.
+  seq = resumeSeqFloor(totalizer.lastSeq(), eventQueue.ackedSeq());
 
   // 4) network + OTA trial-state check
   ota.begin(&store);

@@ -32,6 +32,7 @@
 #include "telemetry.h"
 #include "certs.h"
 #include "timestamp_parse.h"   // overflow-safe int64 parsing (server_time_ms remediation)
+#include "ack_validation.h"    // Miki Wire hardening (F8): ack_seq bounding
 
 class Sync {
 public:
@@ -152,7 +153,18 @@ public:
       st_->incrementPushFailCount();      // same counter -- this is still not an ack
       return false;                       // bare 200 is not an ack (Invariant 6)
     }
-    q_->ackThrough((uint32_t)ackSeq, st_->bootId());
+    // Miki Wire hardening (Phase-0 finding F8): never trust a server ack
+    // beyond the highest seq this batch actually transmitted -- see
+    // ack_validation.h for the full rationale. batch[] is FIFO by append
+    // order and seq is globally monotonic, so the last row holds the max.
+    bool ackClamped = false;
+    uint32_t boundedAck = boundAckSeq((uint32_t)ackSeq, batch[n - 1].seq, &ackClamped);
+    if (ackClamped) {
+      Serial.printf("[SYNC] WARNING: server ack_seq=%ld exceeds highest sent "
+                    "seq=%u -- clamping (server bug? investigate)\n",
+                    ackSeq, (unsigned)batch[n - 1].seq);
+    }
+    q_->ackThrough(boundedAck, st_->bootId());
     lastSyncMs_ = millis();                // DM-Phase 1: getter only, no behavior change
     haveSync_   = true;
 
