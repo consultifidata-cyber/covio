@@ -119,6 +119,13 @@ class Ota {
 public:
   void begin(Store* st) { st_ = st; }
 
+  // Miki Wire hardening (Phase-0 findings F2/F3): optional callback invoked
+  // on every iteration of the blocking image-download loop, so the caller
+  // can prove watchdog liveness and keep the totalizer's PCNT drain /
+  // checkpoint alive during the one legitimate multi-minute block in the
+  // firmware. Unset (nullptr) = exactly the pre-hardening behavior.
+  void setServiceCallback(void (*fn)()) { serviceCb_ = fn; }
+
   // DM-Phase 1: getter only. Precedence mirrors this class's own existing
   // fields: a confirmed trial image reports CONFIRMED even though
   // pendingVerify_ is still true (confirmHealthyBoot() never clears it);
@@ -581,6 +588,14 @@ private:
     bool ioError = false;
 
     while (totalWritten < expectedSize) {
+      // Miki Wire hardening (Phase-0 findings F2/F3): this download is the
+      // one legitimate multi-minute block in the firmware. The service
+      // callback (wired by covio_firmware.ino) feeds the task watchdog and
+      // keeps the totalizer's PCNT drain/checkpoint alive while bytes flow.
+      // Liveness here is genuine, not blind: a dead transfer exits within
+      // 15s via the stall detector below, after which the main loop's own
+      // feed takes over.
+      if (serviceCb_) serviceCb_();
       size_t avail = stream->available();
       if (avail == 0) {
         if (!http.connected()) break;   // connection closed -- loop exit check below decides truncated vs. complete
@@ -637,6 +652,7 @@ private:
   }
 
   Store* st_ = nullptr;
+  void (*serviceCb_)() = nullptr;   // Miki Wire hardening (F2/F3): see doVerifiedUpdate_
   bool pendingVerify_ = false;
   bool confirmed_ = false;
   bool failed_ = false;   // DM-Phase 1: outcome of the most recent update attempt

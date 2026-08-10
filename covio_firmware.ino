@@ -25,6 +25,9 @@
 #include <LittleFS.h>
 #include "esp_system.h"    // esp_reset_reason() -- Balaji V1 freeze remediation
 #include "config.h"
+#if WATCHDOG_ENABLE
+#include "esp_task_wdt.h"  // Miki Wire hardening (F2): task watchdog -- see config.h
+#endif
 #include "store.h"
 #include "totalizer.h"
 #include "queue.h"
@@ -60,6 +63,25 @@ uint32_t seq = 0;              // GLOBALLY monotonic telemetry sequence
 uint32_t tTelemetry = 0, tPush = 0, tConfig = 0, tOta = 0;
 bool     healthySignalled = false;
 bool     crashStreakCleared = false;   // Balaji V1 freeze remediation
+
+// Miki Wire hardening (F2/F3): background service invoked from the OTA
+// download loop (ota.setServiceCallback below) -- the one legitimate
+// multi-minute block in the firmware. Feeds the watchdog (progress is
+// genuine liveness there; a dead transfer exits via OTA's own 15s stall
+// detector) and, rate-limited, drains/checkpoints the totalizer so the
+// 16-bit PCNT counter cannot wrap unobserved on a producing line while a
+// download runs. Also reused by the AP-provisioning branch of loop().
+void covioBackgroundService() {
+#if WATCHDOG_ENABLE
+  esp_task_wdt_reset();
+#endif
+  static uint32_t tBgTot = 0;
+  uint32_t now = millis();
+  if (now - tBgTot >= 30000UL) {   // 30s: well under any plausible PCNT wrap time
+    tBgTot = now;
+    totalizer.service(totalizer.lastSeq());   // drain + checkpoint, seq unchanged
+  }
+}
 
 void setup() {
   Serial.begin(115200);
@@ -229,11 +251,31 @@ void setup() {
                 PIN_CT_STATE, CT_PULSE_HZ);
 #endif
 
+  // Miki Wire hardening (F2/F3): OTA's download loop proves liveness and
+  // keeps the totalizer alive through the callback above.
+  ota.setServiceCallback(covioBackgroundService);
+
+#if WATCHDOG_ENABLE
+  // Miki Wire hardening (F2): arm the task watchdog LAST -- after the
+  // serviceable fatal-halt consoles above (which must stay reachable over
+  // serial forever, not reset-loop) and after the bounded boot-time STA
+  // wait. Rationale, timeout choice, and feed discipline: config.h.
+  esp_task_wdt_init(WATCHDOG_TIMEOUT_S, true);   // true = panic (reset) on expiry
+  esp_task_wdt_add(NULL);                        // subscribe this (loop) task
+  Serial.printf("[WDT] task watchdog armed: %ds\n", WATCHDOG_TIMEOUT_S);
+#endif
+
   Serial.println("[BOOT] entering main loop");
 }
 
 void loop() {
   uint32_t now = millis();
+#if WATCHDOG_ENABLE
+  // One feed per cooperative-loop iteration: the whole firmware is serviced
+  // from this single loop, so completing an iteration IS the liveness proof
+  // (see config.h). Not fed anywhere else except OTA's progress callback.
+  esp_task_wdt_reset();
+#endif
   provision.service();                // serial console (help/show/set/...)
   syncEngine.wifiService();                 // keep WiFi up (non-blocking, backoff); no-op while AP authority is paused
 

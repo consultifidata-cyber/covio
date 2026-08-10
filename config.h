@@ -334,3 +334,35 @@
 // part of a crash loop." This device has no RTC (RISK-11, unchanged), so
 // this is measured in device uptime (millis()), not wall-clock time.
 #define HEALTHY_UPTIME_CLEARS_CRASH_STREAK_MS  (5UL * 60UL * 1000UL)
+
+// ---- Miki Wire hardening (Phase-0 finding F2): task watchdog ---------------
+// Before this, NO watchdog existed anywhere in the firmware -- nothing
+// configured or fed esp_task_wdt, so a hang inside a blocking HTTP/TLS call
+// simply hung the device forever. The whole firmware is one cooperative
+// loop, so subscribing the loop task and feeding once per iteration IS the
+// meaningful liveness proof: every subsystem is serviced from that loop, and
+// a hang anywhere in it stops the feed. The one legitimate long-blocking
+// path (the OTA image download) proves liveness explicitly via the
+// Ota service-callback hook (fed only while download progress/waiting is
+// genuinely being made -- its own 15s stall detector aborts a dead
+// transfer long before this timeout).
+//
+// TIMEOUT CHOICE: must exceed the worst legitimate uninterrupted block --
+// push HTTP timeout 8s + TLS handshake, config poll 6s, captive-portal
+// credential test 15s -- with generous margin, because a false watchdog
+// reset in production is worse than slow hang detection (Phase-1 mandate:
+// "avoid false watchdog resets"). 60s catches every genuine hang while
+// sitting 4x above the worst legitimate stall.
+//
+// The watchdog is armed at the END of setup(), deliberately AFTER the two
+// serviceable fatal-halt consoles (LittleFS-mount failure, RELEASE_BUILD
+// default-key refusal) -- those halts must stay reachable over serial
+// forever, not reset-loop. A watchdog reset is classified by the existing
+// esp_reset_reason() boot code (wdt_cnt / crash streak / REBOOT_LOOP alarm)
+// with zero new diagnostics needed.
+#ifndef WATCHDOG_ENABLE
+#define WATCHDOG_ENABLE     1
+#endif
+#ifndef WATCHDOG_TIMEOUT_S
+#define WATCHDOG_TIMEOUT_S  60
+#endif
