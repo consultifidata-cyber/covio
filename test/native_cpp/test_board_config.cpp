@@ -51,6 +51,44 @@ static_assert(MIKI_WIRE_PROFILE == EXPECT_MIKI,
               "BALAJI PROTECTION: MIKI_WIRE_PROFILE must be OFF in a flag-less build "
               "(and ON only when -DMIKI_WIRE_PROFILE=1 was explicitly passed)");
 
+// ---------------------------------------------------------------------------
+// PRODUCT IDENTITY / OTA CROSS-FLASH GUARD
+// ---------------------------------------------------------------------------
+// ota.h sends DEVICE_MODEL as the manifest's `hw_compat` field and refuses any
+// candidate that does not match it exactly. That string is the ONLY barrier
+// between the two products' OTA channels: if both built to the same value, an
+// oil-flow image would be accepted by the Miki unit (and vice versa), and
+// because the two boards read the sensor on different GPIOs (GPIO1 vs GPIO4),
+// the cross-flashed unit would go on running while silently counting nothing.
+// Freeze both literals here so that failure can only ever be a compile error.
+constexpr bool ceStrEq(const char* a, const char* b) {
+  return (*a == *b) && (*a == '\0' || ceStrEq(a + 1, b + 1));
+}
+
+constexpr const char* HW_COMPAT_OILFLOW  = "covio-oilflow-v1";
+constexpr const char* HW_COMPAT_MIKIWIRE = "miki-wire-v1";
+static_assert(!ceStrEq(HW_COMPAT_OILFLOW, HW_COMPAT_MIKIWIRE),
+              "the two products must never share an OTA hw_compat identity");
+
+#if MIKI_WIRE_PROFILE
+static_assert(ceStrEq(DEVICE_MODEL, HW_COMPAT_MIKIWIRE),
+              "Miki build must advertise hw_compat 'miki-wire-v1'");
+static_assert(!ceStrEq(DEVICE_MODEL, HW_COMPAT_OILFLOW),
+              "CROSS-FLASH RISK: a Miki build must NEVER claim the oil-flow hw_compat");
+static_assert(ceStrEq(DEFAULT_SERVER_URL, "https://compliance.mikigroup.co.in"),
+              "Miki build must default to the Miki backend");
+#else
+// ⚠ FROZEN: the commissioned Balaji meter compares against this exact string
+// on every OTA poll. Changing it cuts that meter off from OTA until it is
+// reflashed over USB.
+static_assert(ceStrEq(DEVICE_MODEL, HW_COMPAT_OILFLOW),
+              "BALAJI PROTECTION: the flag-less build must keep hw_compat 'covio-oilflow-v1'");
+static_assert(!ceStrEq(DEVICE_MODEL, HW_COMPAT_MIKIWIRE),
+              "CROSS-FLASH RISK: an oil-flow build must NEVER claim the Miki hw_compat");
+static_assert(ceStrEq(DEFAULT_SERVER_URL, "https://data.funtastik.co.in"),
+              "oil-flow build must default to the Balaji backend");
+#endif
+
 #if BOARD_MODE == BOARD_RELAY1CH
 // The DEPLOYED production plant's table (HEAD e5a593b) -- frozen.
 static_assert(PIN_PULSE == 1,
@@ -69,6 +107,8 @@ static_assert(PIN_CT_STATE == 5,
 int main() {
   printf("board_mode=%d sensor_mode=%d pin_pulse=%d pin_ct_state=%d\n",
          (int)BOARD_MODE, (int)SENSOR_MODE, (int)PIN_PULSE, (int)PIN_CT_STATE);
+  printf("miki_profile=%d fw_version=%s hw_compat=%s server=%s\n",
+         (int)MIKI_WIRE_PROFILE, FW_VERSION, DEVICE_MODEL, DEFAULT_SERVER_URL);
   printf("ALL BOARD-CONFIG ASSERTIONS PASSED (they are compile-time; reaching main() is the proof)\n");
   return 0;
 }

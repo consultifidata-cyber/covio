@@ -14,9 +14,48 @@
 // ============================================================================
 #pragma once
 
+// ---- Product profile selection (MUST resolve before the identity block) -----
+// This repository builds TWO products from ONE source tree. They differ in
+// exactly three things: which backend they talk to, which GPIO the sensor
+// lands on (the BOARD_MODE pin table further down), and their OTA hardware
+// identity. Everything else -- queue, totalizer, sync, OTA, watchdog,
+// provisioning, diagnostics -- is shared, byte for byte.
+//
+//   MIKI_WIRE_PROFILE 0 (default) : Covio oil flow meter, Balaji Foods
+//   MIKI_WIRE_PROFILE 1           : Miki Wire proximity sensor, MW-001 Ranchi
+//
+// The #ifndef/#define pair is hoisted HERE, above the identity block, because
+// DEVICE_MODEL and DEFAULT_SERVER_URL below both branch on it. The profile's
+// TUNABLES (MIKI_MAX_PULSE_HZ_*, MIKI_SUSPECT_GAP_S_*) stay where they were,
+// further down -- only the selector moved.
+#ifndef MIKI_WIRE_PROFILE
+#define MIKI_WIRE_PROFILE 0
+#endif
+
 // ---- Firmware identity (bump on every release; OTA compares against this) ---
-#define FW_VERSION            "1.0.0"
+// FW_VERSION is a property of the SOURCE TREE, not of a product: both
+// products are cut from the same commit at the same version. What separates
+// them for OTA purposes is DEVICE_MODEL below.
+#define FW_VERSION            "1.1.0"
+
+// ---- OTA hardware identity (hw_compat) --------------------------------------
+// ota.h passes DEVICE_MODEL as the manifest's `hw_compat` field and REFUSES
+// any candidate whose hw_compat does not match exactly. This string is
+// therefore the ONLY thing standing between the two products' OTA channels:
+// without a distinct value per product, an oil-flow image would be accepted
+// by the Miki unit and vice versa -- and since the two boards put the sensor
+// on different GPIOs (GPIO1 vs GPIO4/DI1), a cross-flash silently stops the
+// device counting.
+//
+// ⚠ "covio-oilflow-v1" is FROZEN. The commissioned Balaji meter has it
+// compiled in and compares against it on every OTA poll; changing it would
+// cut that meter off from OTA until someone reflashes it over USB. Never
+// edit it. New products get a NEW string, they never re-use this one.
+#if MIKI_WIRE_PROFILE
+#define DEVICE_MODEL          "miki-wire-v1"
+#else
 #define DEVICE_MODEL          "covio-oilflow-v1"
+#endif
 
 // ---- RISK-15 remediation (OTA anti-downgrade) --------------------------------
 // A SEPARATE, monotonically-increasing integer from FW_VERSION above. Bump
@@ -35,7 +74,25 @@
 // remains here ONLY so the bench stub (server/server.py, still plain HTTP)
 // keeps working with zero config changes -- a deliberate, permanent
 // bench/dev affordance, not a leftover TODO.
-#define DEFAULT_SERVER_URL    "http://192.168.1.3:8000"
+// Each product ships pointing at its OWN backend, so a freshly flashed unit
+// is correct before anyone touches the console. The API PATHS below are
+// identical for both -- only the host differs (the Miki backend runs the same
+// /api/iot/flow/ contract as a compatibility adapter).
+//
+// Both hosts are served by certificates that chain to the roots pinned in
+// certs.h -- verified against the pinned bundle alone, not the OS trust
+// store, for data.funtastik.co.in and compliance.mikigroup.co.in alike.
+//
+// For bench work against server/server.py (plain HTTP), set the URL once over
+// the serial console -- `set url http://<host>:8000` -- which persists in NVS
+// and survives reflashing. That is deliberately a runtime step now: baking a
+// LAN address into a shipped image is a far worse failure mode than one
+// console command on a bench unit.
+#if MIKI_WIRE_PROFILE
+#define DEFAULT_SERVER_URL    "https://compliance.mikigroup.co.in"
+#else
+#define DEFAULT_SERVER_URL    "https://data.funtastik.co.in"
+#endif
 #define DEFAULT_API_KEY       "dev-key-change-me"
 
 // ---- API paths (the shared contract; identical on LCS and cloud) ------------
@@ -389,9 +446,10 @@
 //     margin, above which a configured value is certainly a typo.
 //   - suspect gap 60 s .. 7 days: below a minute would alarm on ordinary
 //     pauses; above a week the feature is indistinguishable from off.
-#ifndef MIKI_WIRE_PROFILE
-#define MIKI_WIRE_PROFILE 0
-#endif
+//
+// The MIKI_WIRE_PROFILE selector itself now lives at the TOP of this file --
+// DEVICE_MODEL and DEFAULT_SERVER_URL branch on it, so it has to resolve
+// before them. Only the tunables below remain here.
 
 // Phase-2 watchdog failure-injection build (validation matrix E2): compiles
 // the serial console's `test_hang` command (provision.h), which simulates a
