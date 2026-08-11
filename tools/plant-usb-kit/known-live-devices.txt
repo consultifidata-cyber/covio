@@ -1,23 +1,31 @@
-# KNOWN LIVE PRODUCTION DEVICES — never bench-flash these
+# KNOWN LIVE PRODUCTION DEVICES -- never bench-flash these
 #
 # One device_id per line. Blank lines and lines starting with # are ignored.
-# scripts\04_bench_flash.ps1 reads the connected device's own device_id off
-# the serial console BEFORE it writes anything, and refuses outright if it
-# finds it here. That is the guard that makes it structurally hard to point a
-# bench procedure at a machine that is metering real production.
+# scripts\04_bench_flash.ps1 identifies the connected board from its eFuse MAC
+# BEFORE it writes anything, and refuses outright if it finds that ID here.
 #
-# device_id is the eFuse MAC and cannot be changed. Read it on any unit with:
+# The MAC is read from silicon, so this check works even when the board's USB
+# console says nothing -- which is exactly the situation that once let a live
+# meter be mistaken for a spare. Do not go back to trusting the console alone.
+#
+# device_id is derived from the eFuse MAC and cannot be changed. Read it with:
 #     serial console @115200  ->  show   ->  "device_id : ..."
+#     or:  python -m esptool --chip esp32s3 --port COMx read_mac
+#          then REVERSE the six bytes (see the byte-order note below)
 
-# Miki Wire MW-001, Ranchi — Wire Drawing Machine 1
+# Miki Wire MW-001, Ranchi -- Wire Drawing Machine 1
 esp32-F84AD1A172E0
 
-# Balaji Foods oil flow meter — mDNS covio-858428.local
+# Balaji Foods oil flow meter -- mDNS covio-858428.local
 #
-# ⚠ NOT FILLED IN YET. Its device_id has never been recorded anywhere we hold.
-# Read it at the meter (serial `show`, or GET http://covio-858428.local/api/v1/info
-# on the plant LAN) and paste it below, uncommented. Until then the bench
-# script cannot recognise the Balaji meter by ID and falls back to asking the
-# operator to confirm — which is weaker, so fill this in at the next visit.
+# RECORDED 2026-08-11, THE HARD WAY. This ID was missing from this file, and a
+# bench session came within one keystroke of flashing untested firmware onto
+# this meter while it was metering and pushing to the ERP. The board looked
+# like a spare and its USB console returned zero bytes, so the device_id check
+# had nothing to match. Only the eFuse MAC gave it away.
 #
-# esp32-XXXXXXXXXXXX
+# NOTE THE BYTE ORDER. esptool prints this chip's MAC as 28:84:85:B2:E5:F4.
+# The firmware reverses it (store.h:170, little-endian uint64) into the ID
+# below. The same chip looks like two different devices in the two tools --
+# always compare the REVERSED form.
+esp32-F4E5B2858428

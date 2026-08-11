@@ -9,10 +9,12 @@
     preserved, exactly as on the plant path -- a bench unit that is already
     provisioned keeps its settings.
 
-    SAFETY: before writing anything it reads the connected device's own
-    device_id off the serial console and refuses if that ID appears in
-    known-live-devices.txt. A bench procedure must never land on a machine
-    that is metering real production.
+    SAFETY: before writing anything it identifies the device from its eFuse
+    MAC (read from silicon by esptool, reversed into the firmware's device_id
+    form) and refuses if that ID appears in known-live-devices.txt. It also
+    refuses if it cannot identify the device at all -- it will not ask a human
+    to vouch for a board it could not name. A bench procedure must never land
+    on a machine that is metering real production.
 
     Usage:
       .\04_bench_flash.ps1                      # oil-flow build (default)
@@ -135,12 +137,44 @@ if ([string]::IsNullOrWhiteSpace($ComPort)) {
 }
 
 # ------------------------------------------- WHICH DEVICE IS THIS, REALLY?
-# Read the device's own identity before touching it. This is the guard that
-# keeps a bench procedure off a production machine.
+# THE AUTHORITATIVE ANSWER IS THE eFUSE MAC, NOT THE CONSOLE.
+#
+# This guard once nearly failed on a live production meter. The board looked
+# like a spare, its USB console returned zero bytes, so no device_id could be
+# read -- and the script fell through to "type BENCH" with the operator
+# believing it was a bench unit. It was the commissioned Balaji oil-flow meter,
+# metering and pushing to the ERP at that moment.
+#
+# The console can be silent for reasons that have nothing to do with the board
+# being blank. The eFuse MAC cannot: esptool reads it from silicon, on any
+# board, in any state. So the MAC is now the identity of record.
+#
+# !! BYTE ORDER IS THE TRAP. esptool prints the MAC in wire order; the firmware
+# builds device_id from ESP.getEfuseMac(), which loads those six bytes into a
+# LITTLE-ENDIAN uint64 and formats "esp32-%04X%08X" (store.h:170). The result
+# is the MAC fully reversed:
+#     esptool  28:84:85:B2:E5:F4   ->   firmware  esp32-F4E5B2858428
+# The same chip therefore looks like two different devices in the two tools.
+# Comparing the un-reversed form against known-live-devices.txt would silently
+# never match. Reverse, then compare.
+function Get-CovioDeviceId {
+    param([string]$Port, [int]$BaudRate)
+    $out = & python -m esptool --chip esp32s3 --port $Port --baud $BaudRate read_mac 2>&1
+    foreach ($line in $out) {
+        if ("$line" -match 'MAC:\s*((?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})') {
+            $bytes = $matches[1].Split(':')
+            [array]::Reverse($bytes)
+            return "esp32-" + (($bytes -join '').ToUpper())
+        }
+    }
+    return $null
+}
+
 Write-Host ""
-Write-Host "Reading the device's identity before writing anything..." -ForegroundColor Cyan
-$deviceId = $null
-$before   = ""
+Write-Host "Identifying the device from its eFuse MAC before writing anything..." -ForegroundColor Cyan
+$deviceId  = Get-CovioDeviceId -Port $ComPort -BaudRate $Baud
+$consoleId = $null
+$before    = ""
 $port = New-Object System.IO.Ports.SerialPort($ComPort, 115200, 'None', 8, 'One')
 # DTR MUST BE ASSERTED. On an ESP32-S3 built with ARDUINO_USB_CDC_ON_BOOT=1,
 # Serial is TinyUSB CDC, and that layer only transmits while the host asserts
@@ -160,7 +194,9 @@ try {
     Start-Sleep -Seconds 3
     $before = $port.ReadExisting()
     foreach ($line in ($before -split "`r?`n")) {
-        if ($line -match '^\s*device_id\s*:\s*(\S+)') { $deviceId = $matches[1].Trim() }
+        # Corroboration only. If the console does answer and disagrees with the
+        # MAC, that is a contradiction worth stopping for, not averaging over.
+        if ($line -match '^\s*device_id\s*:\s*(\S+)') { $consoleId = $matches[1].Trim() }
     }
 } catch {
     Write-Host "Could not open the serial port to identify the device: $($_.Exception.Message)" -ForegroundColor Yellow
@@ -176,33 +212,56 @@ if (Test-Path $liveList) {
                  Where-Object { $_ -ne "" -and -not $_.StartsWith("#") })
 }
 
-if ($deviceId) {
-    Write-Host "  device_id: $deviceId"
-    if ($liveIds -contains $deviceId) {
-        Write-Host ""
-        Write-Host "STOP. THIS IS A LIVE PRODUCTION DEVICE." -ForegroundColor Red
-        Write-Host "$deviceId is listed in known-live-devices.txt." -ForegroundColor Red
-        Write-Host "This script is for bench units only. Nothing was written." -ForegroundColor Red
-        Write-Host "Flashing a production machine is a separate, authorized procedure." -ForegroundColor Red
-        exit 1
-    }
-    Write-Host "  [OK] not in known-live-devices.txt" -ForegroundColor Green
-} else {
-    Write-Host "  Could not read device_id from the console." -ForegroundColor Yellow
-    Write-Host "  The known-live-device check could NOT run against a device_id." -ForegroundColor Yellow
-    Write-Host "  On a blank or non-covio board this is EXPECTED - there is no" -ForegroundColor DarkGray
-    Write-Host "  covio console to answer yet. On a board you believe is running" -ForegroundColor DarkGray
-    Write-Host "  covio firmware, it means something is wrong: stop and say so." -ForegroundColor DarkGray
+# FAIL CLOSED. If we cannot establish who this device is, we do not write to
+# it. The previous version warned and then carried on to the human
+# confirmation -- and a human who believes they are holding a spare will type
+# BENCH. Identity is a machine's job, not a tired operator's.
+if (-not $deviceId) {
+    Write-Host ""
+    Write-Host "CANNOT IDENTIFY THIS DEVICE - nothing was written." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "esptool could not read the eFuse MAC, so there is no way to tell" -ForegroundColor Red
+    Write-Host "whether this is a bench unit or a machine in production." -ForegroundColor Red
+    Write-Host "This script will not guess, and it will not ask you to guess." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Check the cable and the port, then re-run. If esptool genuinely" -ForegroundColor Yellow
+    Write-Host "cannot talk to the board, stop and escalate." -ForegroundColor Yellow
+    exit 1
 }
 
-# The Balaji meter's ID is not recorded yet, so the list alone cannot prove
-# this is a bench unit. Ask the human, and say plainly why.
+Write-Host "  device_id (from eFuse MAC): $deviceId" -ForegroundColor Green
+if ($consoleId) {
+    if ($consoleId -eq $deviceId) {
+        Write-Host "  console agrees: $consoleId" -ForegroundColor Green
+    } else {
+        Write-Host ""
+        Write-Host "CONTRADICTION - nothing was written." -ForegroundColor Red
+        Write-Host "  eFuse MAC says : $deviceId" -ForegroundColor Red
+        Write-Host "  console says   : $consoleId" -ForegroundColor Red
+        Write-Host "Two different identities from one board. Stop and escalate." -ForegroundColor Red
+        exit 1
+    }
+} else {
+    Write-Host "  console did not answer - not a problem, the MAC is authoritative" -ForegroundColor DarkGray
+}
+
+if ($liveIds -contains $deviceId) {
+    Write-Host ""
+    Write-Host "STOP. THIS IS A LIVE PRODUCTION DEVICE." -ForegroundColor Red
+    Write-Host "$deviceId is listed in known-live-devices.txt." -ForegroundColor Red
+    Write-Host "This script is for bench units only. Nothing was written." -ForegroundColor Red
+    Write-Host "Flashing a production machine is a separate, authorized procedure." -ForegroundColor Red
+    exit 1
+}
+Write-Host "  [OK] not in known-live-devices.txt" -ForegroundColor Green
+
 Write-Host ""
-Write-Host "About to write v$benchVersion to the device on $ComPort." -ForegroundColor Yellow
+Write-Host "About to write v$benchVersion to $deviceId on $ComPort." -ForegroundColor Yellow
 Write-Host "This build has never run on hardware. It changes real runtime behaviour:" -ForegroundColor Yellow
 Write-Host "  task watchdog, AP-mode metering, queue rollover, push/OTA backoff." -ForegroundColor Yellow
 Write-Host ""
-Write-Host "Confirm this is a BENCH unit and not a machine in production." -ForegroundColor Yellow
+Write-Host "The ID above is read from silicon and cannot be spoofed by a silent" -ForegroundColor Yellow
+Write-Host "console. If you do not recognise it as a bench unit, abort." -ForegroundColor Yellow
 $confirm = Read-Host "Type BENCH to proceed, anything else to abort"
 if ($confirm -ne "BENCH") {
     Write-Host "Aborted. Nothing was written." -ForegroundColor Cyan
