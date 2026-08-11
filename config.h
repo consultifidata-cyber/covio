@@ -36,7 +36,7 @@
 // FW_VERSION is a property of the SOURCE TREE, not of a product: both
 // products are cut from the same commit at the same version. What separates
 // them for OTA purposes is DEVICE_MODEL below.
-#define FW_VERSION            "1.2.0"
+#define FW_VERSION            "1.2.1"
 
 // ---- OTA hardware identity (hw_compat) --------------------------------------
 // ota.h passes DEVICE_MODEL as the manifest's `hw_compat` field and REFUSES
