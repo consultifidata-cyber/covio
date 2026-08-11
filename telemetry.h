@@ -56,13 +56,46 @@ public:
   // per batch) so the receiver can validate/dispatch each record independently
   // — this is what makes a batch mixing the current and previous schema
   // version (normal during an OTA rollout window) well-formed and acceptable.
-  static String toJson(Store& st, const QRow* rows, int n) {
+  // `otaState` / `otaReject` are the device's own OTA status, forwarded to the
+  // cloud in the ENVELOPE -- alongside fw/model/kfactor_version, which are
+  // likewise facts about the sender rather than about any record.
+  //
+  // WHY THIS EXISTS. The reject reason used to live only on the LAN-only
+  // /api/v1/health endpoint and the serial console, so the only way to learn
+  // why a meter had refused an update was to send a person to the plant and
+  // put them on its network. That cost real trips, and on one of them a live
+  // production meter was nearly reflashed by mistake. A meter that can explain
+  // itself to the cloud never needs that visit again.
+  //
+  // ADR-001 IS NOT AFFECTED. schema_version and record_type are carried
+  // PER-RECORD and are unchanged; this adds an envelope-level field only, so
+  // the record contract every receiver validates against is byte-for-byte what
+  // it was. Receivers read the envelope with .get()-style lookups and ignore
+  // what they do not know, so an older receiver simply does not see it.
+  //
+  // Both default to nullptr, and a nullptr is omitted rather than sent as the
+  // string "null" -- absent means "this build/caller had nothing to say",
+  // which is different from a JSON null meaning "asked, and there is none".
+  static String toJson(Store& st, const QRow* rows, int n,
+                       const char* otaState = nullptr,
+                       const char* otaReject = nullptr) {
     String s;
-    s.reserve(128 + n * 128);
+    s.reserve(160 + n * 128);
     s  = "{\"device_id\":\"" + st.deviceId() + "\"";
     s += ",\"fw\":\"" FW_VERSION "\"";
     s += ",\"model\":\"" DEVICE_MODEL "\"";
     s += ",\"kfactor_version\":" + String(st.cfgVer());
+    if (otaState || otaReject) {
+      s += ",\"ota\":{";
+      bool first = true;
+      if (otaState)  { s += "\"state\":\"" + String(otaState) + "\""; first = false; }
+      if (otaReject) {
+        if (!first) s += ",";
+        s += "\"last_reject_reason\":\"" + String(otaReject) + "\"";
+      }
+      s += ",\"security_version\":" + String(st.securityVersion());
+      s += "}";
+    }
     s += ",\"records\":[";
     for (int i = 0; i < n; i++) {
       if (i) s += ",";

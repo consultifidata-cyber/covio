@@ -273,14 +273,10 @@ public:
     return "configured";
   }
 
-  static const char* otaStateStr_(OtaState s) {
-    switch (s) {
-      case OTA_STATE_PENDING_VERIFY: return "pending_verify";
-      case OTA_STATE_CONFIRMED:      return "confirmed";
-      case OTA_STATE_FAILED:         return "failed";
-      default:                       return "none";
-    }
-  }
+  // Delegates to ota.h's otaStateStr(), which the cloud push envelope also
+  // uses. Kept as a thin wrapper so this header's existing call sites do not
+  // all have to change, but there is now exactly ONE switch over OtaState.
+  static const char* otaStateStr_(OtaState s) { return otaStateStr(s); }
 
 private:
   // Part 8 (this remediation pass): the prior ESP_RST_EXT-only guess did
