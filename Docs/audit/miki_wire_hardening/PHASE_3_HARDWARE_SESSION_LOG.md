@@ -87,6 +87,43 @@ which simultaneously proves it runs AP-fallback-capable firmware.
 
 ---
 
+## Session 4 — 2026-08-11 ~09:30 — ⛔ STOP 1: BALAJI PRODUCTION DEVICE DETECTED ON THE BENCH
+
+A device appeared on COM6 (`VID_303A:PID_1001`, ESP32-S3 native USB-Serial/
+JTAG). Identification sequence and result:
+
+1. Read-only serial listen + `show` on COM6 @115200: zero bytes (no banner,
+   no console response).
+2. `esptool read_mac` (read-only; enters bootloader briefly, hard-resets
+   back to run): **ESP32-S3 rev v0.2, MAC `28:84:85:B2:E5:F4`**.
+3. Identity resolution: `Store::chipId()` prints the eFuse MAC via
+   little-endian `%04X%08X`, i.e. device_id hex = true-MAC bytes REVERSED.
+   `28:84:85:B2:E5:F4` reversed = `F4:E5:B2:85:84:28` →
+   **device_id `esp32-F4E5B2858428` = THE BALAJI PRODUCTION DEVICE**
+   (boot_id-54 unit, `data.funtastik.co.in`, clean `e5a593b` build).
+   Cross-check: not MW-001 (its true MAC would be `E0:72:A1:D1:4A:F8`).
+
+**Actions taken on the device: identification only.** The esptool read
+performed one hard reset back into its own firmware (a normal reboot the
+firmware is designed for — boot_id/restart counters increment; no flash,
+NVS, config, or data was written or erased). Nothing else was, or will be,
+executed against this unit.
+
+**Consequence (mandate §1/§27 STOP 1):** the end-to-end bench workflow is
+HALTED. This unit must not be used as the bench target. All hardware
+validation remains BLOCKED. Awaiting explicit owner instruction: disconnect
+the Balaji unit and connect a dedicated non-production ESP32-S3-POE-ETH-
+8DI-8DO bench device.
+
+Note for the record: the Balaji unit being on this bench (not at the plant)
+is itself operationally significant — while here, the Balaji deployment is
+necessarily not reporting from site. Its serial console was silent on CDC,
+consistent with its `e5a593b` build's console living on this same native-USB
+port but the running app producing no output at idle — not investigated
+further, out of scope without authorization.
+
+---
+
 ## Required physical hardware (blocking everything below A-row procedures)
 
 1. **Waveshare ESP32-S3-POE-ETH-8DI-8DO** bench unit (NOT the MW-001
