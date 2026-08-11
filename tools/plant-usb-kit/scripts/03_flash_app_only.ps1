@@ -161,7 +161,15 @@ Write-Host "Waiting for the meter to boot, then reading it back..." -ForegroundC
 Start-Sleep -Seconds 6
 
 $port = New-Object System.IO.Ports.SerialPort($ComPort, 115200, 'None', 8, 'One')
-$port.DtrEnable = $false
+# DTR MUST BE ASSERTED. On an ESP32-S3 built with ARDUINO_USB_CDC_ON_BOOT=1,
+# Serial is TinyUSB CDC, and that layer only transmits while the host asserts
+# DTR -- with DTR low the device writes into a void and the host reads 0 bytes.
+# An earlier version of this kit held DTR low to avoid resetting the device and
+# got exactly that: a completely silent console on a working board. Asserting
+# DTR may reboot the unit on connect; that is survivable (queue lives in SPIFFS,
+# totalizer is checkpointed) and the boot banner it produces is useful. RTS
+# stays low -- it is the RTS/DTR *sequence* that drives the reset logic.
+$port.DtrEnable = $true
 $port.RtsEnable = $false
 $port.ReadTimeout = 500
 try {

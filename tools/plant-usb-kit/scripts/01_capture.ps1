@@ -21,7 +21,8 @@
 param(
     [string]$ComPort = "",
     [int]$Minutes = 7,
-    [string]$MeterHost = "covio-858428.local"
+    [string]$MeterHost = "covio-858428.local",
+    [switch]$NoDtr
 )
 
 $ErrorActionPreference = "Stop"
@@ -98,9 +99,20 @@ Write-Host "Leave this window alone until it finishes. Do not unplug the cable."
 Write-Host ""
 
 $port = New-Object System.IO.Ports.SerialPort($ComPort, 115200, 'None', 8, 'One')
-# Hold both control lines low: on an ESP32-S3's native USB-Serial/JTAG a
-# DTR/RTS toggle is what triggers a reset. We do not want to reboot the meter.
-$port.DtrEnable   = $false
+# DTR MUST BE ASSERTED. On an ESP32-S3 built with ARDUINO_USB_CDC_ON_BOOT=1,
+# Serial is TinyUSB CDC, and that layer only transmits while the host asserts
+# DTR -- with DTR low the device writes into a void and the host reads 0 bytes.
+# An earlier version of this kit held DTR low to avoid rebooting the meter and
+# produced exactly that: a completely silent console on a working board, which
+# would have wasted an entire plant visit whose whole purpose is reading one
+# line off this port.
+#
+# Asserting DTR may reboot the unit when the port opens. That is survivable --
+# the queue lives in SPIFFS and the totalizer is checkpointed -- and the boot
+# banner it produces is itself useful evidence. RTS stays low: it is the
+# RTS/DTR *sequence* that drives the reset logic, not DTR alone.
+# Use -NoDtr only to reproduce the old behaviour for comparison.
+$port.DtrEnable   = (-not $NoDtr)
 $port.RtsEnable   = $false
 $port.ReadTimeout = 500
 $port.NewLine     = "`n"
