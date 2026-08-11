@@ -22,7 +22,14 @@ param(
     [string]$ComPort = "",
     [int]$Minutes = 7,
     [string]$MeterHost = "covio-858428.local",
-    [switch]$NoDtr
+    [switch]$NoDtr,
+    # LAN ONLY: never open the serial port, never touch USB. Use this on a
+    # meter that is running production. Opening the serial port asserts DTR,
+    # which can reboot the unit; over HTTP we take nothing but a reading.
+    # The device's HTTP endpoints expose strictly more than the console does,
+    # including ota.last_reject_reason, so this is not a lesser capture -- on a
+    # live meter it is the better one.
+    [switch]$LanOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -37,8 +44,14 @@ Write-Host ""
 Write-Host "=== COVIO METER - JOB 1: CAPTURE EVIDENCE (read-only) ===" -ForegroundColor Cyan
 Write-Host ""
 
+if ($LanOnly) {
+    Write-Host "LAN-ONLY MODE: no serial port will be opened and USB will not be" -ForegroundColor Cyan
+    Write-Host "touched. Safe to run against a meter that is in production." -ForegroundColor Cyan
+    Write-Host ""
+}
+
 # ---------------------------------------------------------------- find the port
-if ([string]::IsNullOrWhiteSpace($ComPort)) {
+if (-not $LanOnly -and [string]::IsNullOrWhiteSpace($ComPort)) {
     Write-Host "Looking for the meter on USB (Espressif VID 303A / PID 1001)..."
     $candidates = @()
     try {
@@ -78,16 +91,64 @@ if ([string]::IsNullOrWhiteSpace($ComPort)) {
 # the same WiFi as the meter. Failure here is normal and harmless.
 Write-Host ""
 Write-Host "Trying the meter's web endpoints over the plant WiFi (optional)..."
+$lanReached = $false
+$otaBlocks  = @()
 foreach ($ep in @("info", "status", "health", "metrics")) {
     $url = "http://$MeterHost/api/v1/$ep"
     try {
-        $resp = Invoke-WebRequest -Uri $url -TimeoutSec 6 -UseBasicParsing -ErrorAction Stop
+        $resp = Invoke-WebRequest -Uri $url -TimeoutSec 8 -UseBasicParsing -ErrorAction Stop
         $out  = Join-Path $evidenceDir "http-$ep-$stamp.json"
         $resp.Content | Out-File -FilePath $out -Encoding utf8
         Write-Host "  [OK]   $ep  -> $(Split-Path -Leaf $out)" -ForegroundColor Green
+        $lanReached = $true
+        try {
+            $j = $resp.Content | ConvertFrom-Json
+            if ($j.ota) { $otaBlocks += ,@($ep, $j.ota) }
+        } catch { }
     } catch {
-        Write-Host "  [skip] $ep  (not reachable from this laptop - this is fine)" -ForegroundColor DarkGray
+        Write-Host "  [skip] $ep  (not reachable from this laptop)" -ForegroundColor DarkGray
     }
+}
+
+# THE ANSWER WE HAVE BEEN CHASING lives in here. The device refuses OTA updates
+# and only the device knows why; last_reject_reason is that reason, and it is
+# reachable over plain HTTP without touching the unit at all.
+if ($lanReached) {
+    Write-Host ""
+    Write-Host "--- OTA state as the device reports it ---" -ForegroundColor Cyan
+    if ($otaBlocks.Count -eq 0) {
+        Write-Host "  No 'ota' block in any endpoint's response." -ForegroundColor Yellow
+        Write-Host "  Read the saved http-*.json files directly." -ForegroundColor Yellow
+    }
+    foreach ($pair in $otaBlocks) {
+        $ota = $pair[1]
+        Write-Host "  (from /api/v1/$($pair[0]))"
+        foreach ($f in @("state", "last_reject_reason", "last_checked_ms", "current_version")) {
+            if ($null -ne $ota.$f) { Write-Host ("    {0,-20} {1}" -f $f, $ota.$f) }
+        }
+        if ($ota.last_reject_reason) {
+            Write-Host ""
+            Write-Host "  >>> OTA REJECTION REASON: $($ota.last_reject_reason)" -ForegroundColor Green
+            Write-Host "  >>> This is what the trip was for. Send this to the founder." -ForegroundColor Green
+        } elseif ($null -ne $ota.state) {
+            Write-Host "    (no rejection recorded - the device may not have been" -ForegroundColor DarkGray
+            Write-Host "     offered an update since it last booted)" -ForegroundColor DarkGray
+        }
+    }
+}
+
+if ($LanOnly) {
+    Write-Host ""
+    Write-Host "=== LAN-ONLY CAPTURE COMPLETE ===" -ForegroundColor Cyan
+    if (-not $lanReached) {
+        Write-Host "The meter was NOT reachable at $MeterHost." -ForegroundColor Red
+        Write-Host "Check this laptop is on the same network as the meter, or pass" -ForegroundColor Yellow
+        Write-Host "-MeterHost <ip> if you know its address. Nothing was touched." -ForegroundColor Yellow
+        exit 1
+    }
+    Write-Host "Saved to: $evidenceDir" -ForegroundColor Green
+    Write-Host "No serial port was opened and USB was not touched." -ForegroundColor Green
+    exit 0
 }
 
 # --------------------------------------------------------------- serial capture
