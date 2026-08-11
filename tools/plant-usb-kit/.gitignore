@@ -1,0 +1,28 @@
+# Firmware binaries are NOT committed. They are fetched from GitHub Releases by
+# scripts\05_check_repo.ps1 (bench) and scripts\06_fetch_plant_firmware.ps1
+# (plant), each verified against the .sha256 that CI generated beside it.
+#
+# Two reasons, and the second is the important one:
+#   1. They are ~1 MB each and would bloat every clone forever.
+#   2. A binary committed here would drift from the release it claims to be.
+#      Fetching means the checksum is always the one CI produced for that exact
+#      image, and the plant firmware only lands on a laptop when somebody
+#      deliberately asks for it.
+#
+# NO binary is committed here at all, including boot_app0.bin. That file is
+# framework-supplied and identical across releases -- verified byte-identical
+# between the v1.0.0 build set and the v1.1.0 release asset -- so
+# 06_fetch_plant_firmware.ps1 pulls it from the release alongside the app
+# image. This keeps the tree consistent with the repo's root .gitignore, which
+# ignores *.bin globally and admits exceptions only via a deliberate
+# `git add -f`.
+artifacts/bench/*.bin
+artifacts/bench/*.sha256
+artifacts/bench/VERSION.txt
+artifacts/plant-v1.0.2/*.bin
+artifacts/plant-v1.0.2/*.sha256
+
+# Whatever a visit captures is evidence from that visit, not repo content.
+evidence/*
+!evidence/.gitkeep
+!.gitkeep

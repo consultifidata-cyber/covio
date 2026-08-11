@@ -1,0 +1,23 @@
+# KNOWN LIVE PRODUCTION DEVICES — never bench-flash these
+#
+# One device_id per line. Blank lines and lines starting with # are ignored.
+# scripts\04_bench_flash.ps1 reads the connected device's own device_id off
+# the serial console BEFORE it writes anything, and refuses outright if it
+# finds it here. That is the guard that makes it structurally hard to point a
+# bench procedure at a machine that is metering real production.
+#
+# device_id is the eFuse MAC and cannot be changed. Read it on any unit with:
+#     serial console @115200  ->  show   ->  "device_id : ..."
+
+# Miki Wire MW-001, Ranchi — Wire Drawing Machine 1
+esp32-F84AD1A172E0
+
+# Balaji Foods oil flow meter — mDNS covio-858428.local
+#
+# ⚠ NOT FILLED IN YET. Its device_id has never been recorded anywhere we hold.
+# Read it at the meter (serial `show`, or GET http://covio-858428.local/api/v1/info
+# on the plant LAN) and paste it below, uncommented. Until then the bench
+# script cannot recognise the Balaji meter by ID and falls back to asking the
+# operator to confirm — which is weaker, so fill this in at the next visit.
+#
+# esp32-XXXXXXXXXXXX

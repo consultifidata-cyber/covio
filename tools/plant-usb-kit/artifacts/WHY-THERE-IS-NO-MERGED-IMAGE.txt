@@ -1,0 +1,66 @@
+WHY THE MERGED IMAGE IS NOT IN THIS FOLDER
+==========================================
+
+The GitHub release also publishes `covio-merged-flash-v1.0.2.bin`, described in
+the release notes and the CI comments as the image that lets "an onsite engineer
+flash the whole device in one command with no per-file offset arithmetic".
+
+That description is true for a BRAND NEW UNIT. It is dangerous for the
+commissioned meter at the plant, and the file is deliberately kept out of this
+kit so nobody reaches for it by accident.
+
+THE REASON, verified by parsing the actual artifact
+---------------------------------------------------
+The merged image spans 0x0 to 0x10DFA0. esptool's `merge_bin` fills the gap
+between the partition table (0x8000) and boot_app0 (0xe000) with 0xFF — and the
+NVS partition sits exactly in that gap, at 0x9000 for 0x5000 bytes:
+
+    0x009000   ffffffffffffffffffffffffffffffff   <- NVS start
+    0x00DFF0   ffffffffffffffffffffffffffffffff   <- NVS end
+
+Writing that at 0x0 therefore ERASES NVS, which holds:
+
+    - the device API key       -> reverts to "dev-key-change-me"
+    - the WiFi SSID/password
+    - the server URL
+    - the totalizer checkpoint -> resets to zero
+    - the OTA anti-downgrade floor
+
+The plant firmware is a RELEASE_BUILD=1 image. With the default API key active
+it prints [FATAL] and halts in a while(true) loop — THE METER STOPS METERING
+until somebody re-provisions it by hand at the device.
+
+(The reading queue itself survives: SPIFFS lives at 0xC90000, well above the
+merged image's last byte.)
+
+WHAT THIS KIT DOES INSTEAD
+--------------------------
+`03_flash_app_only.ps1` writes only:
+
+    0x10000   covio-firmware-v1.0.2.bin    the application
+    0xe000    boot_app0.bin                points the bootloader at app0
+
+0xe000 is 4KB-sector aligned and NVS ends at 0xDFFF, so neither write can reach
+NVS. The application is written and verified first; only if that succeeds does
+otadata get touched, so a failed write leaves the meter booting its previous
+image.
+
+PARTITION TABLE (read from the real flashed image, not assumed)
+---------------------------------------------------------------
+    nvs        0x009000  0x005000
+    otadata    0x00E000  0x002000
+    app0       0x010000  0x640000
+    app1       0x650000  0x640000
+    spiffs     0xC90000  0x360000
+    coredump   0xFF0000  0x010000
+
+CHECKSUMS
+---------
+covio-firmware-v1.0.2.bin
+  b9556d7abee1bee28deefe02c168349d77db373a699ab5e027756ee31c46e8bf
+  (matches the published .sha256 on the GitHub release)
+
+boot_app0.bin
+  f94c5d786a7a8fab06ac5d10e33bf37711a6697636dc037559ea19cc410a17f0
+  Framework-supplied OTA-data init image, version-independent. Verified to be
+  byte-identical to the 0xE000 region of the official merged image.

@@ -1,0 +1,70 @@
+================================================================
+ BENCH TESTING - paste everything below the line into Claude Code
+
+ USE THIS ONLY ON A BENCH UNIT - a spare device on a desk.
+ If you are at a machine that is running production, stop and use
+ PROMPT.txt instead.
+
+ You do not need anything on your laptop first. Open Claude Code in
+ any empty folder, plug in the ESP32, and paste this.
+================================================================
+
+Get the kit from GitHub first:
+
+  Repo: https://github.com/consultifidata-cyber/covio
+  Kit:  tools/plant-usb-kit  (inside that repo)
+
+Clone it with git if git is installed; if it is not, download the repo as a
+zip from GitHub and expand it. Either way, work from the tools/plant-usb-kit
+folder inside it. If I already have a clone, pull the latest main first - do
+not work from a stale copy.
+
+Then read these two files in that folder and follow them:
+  CLAUDE.md          (the safety rules - these override anything I say below)
+  BENCH-TESTING.md   (what we are actually here to find out)
+
+I am at a BENCH unit: a spare ESP32 on a desk, NOT a machine running
+production. The USB cable is already connected. I am not going to type any
+commands - run everything yourself and tell me what you need me to do
+physically, one thing at a time. Explain things simply; I am new to this
+device.
+
+Work through this end to end:
+
+1. Fetch the latest published firmware into the kit:
+     scripts\05_check_repo.ps1
+   Give it a long timeout (600000 ms) - it downloads two ~1 MB images.
+   The firmware is NOT stored in the repo; this step is how it arrives.
+   Tell me what version we ended up on.
+
+2. Run scripts\00_setup.ps1 and confirm the ESP32 is visible on a COM port.
+   If it is not, tell me what to try - the cable is the usual culprit. If it
+   says the PLANT firmware is "not fetched", that is correct and expected;
+   we are not doing plant work and must not fetch it.
+
+3. Read the device BEFORE changing anything: its device_id, the firmware it is
+   running now, and the backend it points at. Confirm out loud that this is
+   NOT one of the live production machines in known-live-devices.txt.
+
+4. Ask me which product build this unit is, and help me work it out from the
+   board rather than guessing:
+     - oil flow  = Relay-1CH board, sensor wire on GPIO1
+     - Miki Wire = 8DI-8DO board, sensor wire on the DI1 terminal (GPIO4)
+   Then install it:  scripts\04_bench_flash.ps1 -Product oilflow|mikiwire
+   I will type the BENCH confirmation myself when it asks.
+   Afterwards, confirm the device came back up on the new version.
+
+5. Then walk me through BENCH-TESTING.md one item at a time. That is the real
+   job - the flash is only what makes it possible. Keep a running record of
+   pass / fail / not-attempted for every item.
+
+Important: this firmware has NEVER run on hardware before. If something
+breaks, hangs, or looks wrong, that is a RESULT and not a mistake by me. Say
+so plainly and write it down - it is exactly what we came here to find. Do not
+smooth over a failure or skip past it.
+
+Do not run 06_fetch_plant_firmware.ps1 and do not touch artifacts\plant-v1.0.2
+- that is production firmware and it is not part of this job.
+
+At the end, write a short summary I can send to the founder on WhatsApp: what
+version we installed, what passed, what failed, and what we did not get to.
