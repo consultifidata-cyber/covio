@@ -40,6 +40,7 @@ Usage:
         --valid-days 30 \\
         --out server/firmware/manifest.json
 """
+
 import argparse
 import base64
 import hashlib
@@ -48,8 +49,8 @@ import os
 import sys
 import time
 
-from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 
 DEFAULT_TEST_KEY_PATH = os.path.join(os.path.dirname(__file__), ".test_signing_key.pem")
 DEFAULT_PRODUCTION_KEY_PATH = os.path.join(os.path.dirname(__file__), ".production_signing_key.pem")
@@ -58,12 +59,22 @@ DEFAULT_PRODUCTION_KEY_PATH = os.path.join(os.path.dirname(__file__), ".producti
 def build_canonical_string(fields):
     """MUST exactly match ota_manifest_auth.h::buildCanonicalManifestString()'s
     field order and delimiter ('\\n', no trailing newline)."""
-    return "\n".join(str(x) for x in [
-        fields["hw_compat"], fields["version"], fields["security_version"],
-        fields["schema_version"], fields["image_size"], fields["image_sha256"],
-        fields["image_url"], fields["channel"], fields["issued_at"],
-        fields["expires_at"], fields["manifest_id"],
-    ])
+    return "\n".join(
+        str(x)
+        for x in [
+            fields["hw_compat"],
+            fields["version"],
+            fields["security_version"],
+            fields["schema_version"],
+            fields["image_size"],
+            fields["image_sha256"],
+            fields["image_url"],
+            fields["channel"],
+            fields["issued_at"],
+            fields["expires_at"],
+            fields["manifest_id"],
+        ]
+    )
 
 
 def _generate_keypair(path):
@@ -78,8 +89,11 @@ def _generate_keypair(path):
     point of writing the file to local disk with 0600 permissions.
     """
     if os.path.exists(path):
-        print(f"REFUSING to overwrite existing key at {path} -- remove it first if you really want a new one.",
-              file=sys.stderr)
+        print(
+            f"REFUSING to overwrite existing key at {path} -- "
+            "remove it first if you really want a new one.",
+            file=sys.stderr,
+        )
         sys.exit(1)
     private_key = ec.generate_private_key(ec.SECP256R1())
     priv_pem = private_key.private_bytes(
@@ -90,21 +104,30 @@ def _generate_keypair(path):
     with open(path, "wb") as f:
         f.write(priv_pem)
     os.chmod(path, 0o600)
-    pub_pem = private_key.public_key().public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo,
-    ).decode()
+    pub_pem = (
+        private_key.public_key()
+        .public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        .decode()
+    )
     return pub_pem
 
 
 def gen_test_key(path):
     pub_pem = _generate_keypair(path)
     print(f"Test private key written to: {path}")
-    print("This file is gitignored (server/tools/.test_signing_key.pem) -- "
-          "it must NEVER be committed. Regenerate any time by deleting it and re-running --gen-test-key.")
+    print(
+        "This file is gitignored (server/tools/.test_signing_key.pem) -- "
+        "it must NEVER be committed. Regenerate any time by deleting it "
+        "and re-running --gen-test-key."
+    )
     print()
-    print("Paste this PUBLIC key into ota_keys.h's COVIO_OTA_PUBLIC_KEY_PEM "
-          "(TEST/non-production use only):")
+    print(
+        "Paste this PUBLIC key into ota_keys.h's COVIO_OTA_PUBLIC_KEY_PEM "
+        "(TEST/non-production use only):"
+    )
     print()
     print(pub_pem)
 
@@ -194,19 +217,34 @@ def sign_manifest(args):
         print(out)
 
     if args.print_canonical:
-        print("\n--- canonical string (for cross-checking against the C++ implementation) ---",
-              file=sys.stderr)
+        print(
+            "\n--- canonical string (for cross-checking against the C++ implementation) ---",
+            file=sys.stderr,
+        )
         print(repr(canonical), file=sys.stderr)
 
 
 def main():
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--gen-test-key", action="store_true", help="Generate a new local test signing keypair")
-    p.add_argument("--gen-production-key", action="store_true",
-                   help="Generate a new PRODUCTION signing keypair (one-time release ceremony -- "
-                        "see Docs/audit/coviu_balaji_v1_freeze/03_OTA_SIGNING_KEY_CEREMONY.md)")
-    p.add_argument("--production-key-path", default=DEFAULT_PRODUCTION_KEY_PATH,
-                   help="Destination for --gen-production-key (default: server/tools/.production_signing_key.pem)")
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    p.add_argument(
+        "--gen-test-key", action="store_true", help="Generate a new local test signing keypair"
+    )
+    p.add_argument(
+        "--gen-production-key",
+        action="store_true",
+        help="Generate a new PRODUCTION signing keypair (one-time release ceremony -- "
+        "see Docs/audit/coviu_balaji_v1_freeze/03_OTA_SIGNING_KEY_CEREMONY.md)",
+    )
+    p.add_argument(
+        "--production-key-path",
+        default=DEFAULT_PRODUCTION_KEY_PATH,
+        help=(
+            "Destination for --gen-production-key "
+            "(default: server/tools/.production_signing_key.pem)"
+        ),
+    )
     p.add_argument("--sign", action="store_true", help="Sign a manifest")
     p.add_argument("--private-key", default=DEFAULT_TEST_KEY_PATH)
     p.add_argument("--hw-compat", default="covio-oilflow-v1")

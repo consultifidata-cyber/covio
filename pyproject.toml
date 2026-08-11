@@ -3,12 +3,20 @@
 # linting and formatting (one fast tool instead of separately configuring
 # flake8 + black + isort) -- see Docs/CODE_QUALITY.md for the reasoning.
 #
-# Configuration only: RE-3 does not run `ruff format` against any existing
-# file. No Python interpreter/ruff binary has been available in any
-# environment this project has been developed in so far (see VERSIONS.md) --
-# this config is unexecuted here, exactly as disclosed for every other
-# Python-side deliverable in this project's history. See RE-4 for the first
-# actual CI-run verification.
+# STATUS: this config is now actually enforced and the tree actually
+# complies. It spent its first months unexecuted -- written, but with no
+# Python interpreter available in any development environment (VERSIONS.md)
+# -- and when CI finally ran it, it reported 70 violations. Because the
+# Code Quality job is BLOCKING, that failure skipped Package Desktop App and
+# Publish GitHub Release on every tag, which is why no release was ever
+# published by CI and the v1.0.1/v1.0.2 assets had to be attached by hand.
+#
+# The tree was brought into compliance by running `ruff check --fix` and
+# `ruff format` (the formatter this file configures but that had never been
+# run against an existing file), plus a handful of manual fixes for long SQL
+# and HTML string literals the formatter cannot split. ruff is now pinned
+# exactly in requirements-dev.txt so an upstream release cannot re-break the
+# gate on its own.
 
 [tool.ruff]
 line-length = 100

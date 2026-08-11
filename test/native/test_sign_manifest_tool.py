@@ -13,6 +13,7 @@ run via this Python suite).
 Run:
     python -m unittest discover -s test/native -v
 """
+
 import os
 import sys
 import tempfile
@@ -20,10 +21,9 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "server", "tools"))
 import sign_manifest  # noqa: E402
-
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 
 
 class SignManifestToolTests(unittest.TestCase):
@@ -76,14 +76,23 @@ class SignManifestToolTests(unittest.TestCase):
 
     def test_canonical_string_field_order_and_delimiter(self):
         fields = {
-            "hw_compat": "covio-oilflow-v1", "version": "1.0.1", "security_version": 1,
-            "schema_version": 1, "image_size": 100, "image_sha256": "abc",
-            "image_url": "http://x/y.bin", "channel": "stable",
-            "issued_at": 111, "expires_at": 222, "manifest_id": "mid",
+            "hw_compat": "covio-oilflow-v1",
+            "version": "1.0.1",
+            "security_version": 1,
+            "schema_version": 1,
+            "image_size": 100,
+            "image_sha256": "abc",
+            "image_url": "http://x/y.bin",
+            "channel": "stable",
+            "issued_at": 111,
+            "expires_at": 222,
+            "manifest_id": "mid",
         }
         canonical = sign_manifest.build_canonical_string(fields)
-        self.assertEqual(canonical,
-                          "covio-oilflow-v1\n1.0.1\n1\n1\n100\nabc\nhttp://x/y.bin\nstable\n111\n222\nmid")
+        self.assertEqual(
+            canonical,
+            "covio-oilflow-v1\n1.0.1\n1\n1\n100\nabc\nhttp://x/y.bin\nstable\n111\n222\nmid",
+        )
 
     def test_signed_manifest_produces_a_real_verifiable_signature(self):
         priv = self._gen_key()
@@ -106,7 +115,9 @@ class SignManifestToolTests(unittest.TestCase):
 
         sign_manifest.sign_manifest(Args())
 
-        import json, base64
+        import base64
+        import json
+
         with open(Args.out) as f:
             manifest = json.load(f)
 
@@ -115,16 +126,25 @@ class SignManifestToolTests(unittest.TestCase):
         # sign_manifest.py's own verification logic (it doesn't have any;
         # this proves the SIGNATURE ITSELF is real and correct, not just
         # that the tool's internal bookkeeping is self-consistent).
-        canonical = sign_manifest.build_canonical_string({
-            "hw_compat": manifest["hw_compat"], "version": manifest["version"],
-            "security_version": manifest["security_version"], "schema_version": manifest["schema_version"],
-            "image_size": manifest["image_size"], "image_sha256": manifest["image_sha256"],
-            "image_url": manifest["url"], "channel": manifest["channel"],
-            "issued_at": manifest["issued_at"], "expires_at": manifest["expires_at"],
-            "manifest_id": manifest["manifest_id"],
-        })
+        canonical = sign_manifest.build_canonical_string(
+            {
+                "hw_compat": manifest["hw_compat"],
+                "version": manifest["version"],
+                "security_version": manifest["security_version"],
+                "schema_version": manifest["schema_version"],
+                "image_size": manifest["image_size"],
+                "image_sha256": manifest["image_sha256"],
+                "image_url": manifest["url"],
+                "channel": manifest["channel"],
+                "issued_at": manifest["issued_at"],
+                "expires_at": manifest["expires_at"],
+                "manifest_id": manifest["manifest_id"],
+            }
+        )
         sig = base64.b64decode(manifest["signature"])
-        pub.verify(sig, canonical.encode("utf-8"), ec.ECDSA(hashes.SHA256()))  # raises if invalid -- no exception = pass
+        pub.verify(
+            sig, canonical.encode("utf-8"), ec.ECDSA(hashes.SHA256())
+        )  # raises if invalid -- no exception = pass
 
     def test_tampered_manifest_field_fails_verification(self):
         priv = self._gen_key()
@@ -147,30 +167,41 @@ class SignManifestToolTests(unittest.TestCase):
 
         sign_manifest.sign_manifest(Args())
 
-        import json, base64
+        import base64
+        import json
+
         with open(Args.out) as f:
             manifest = json.load(f)
 
         # Tamper: attacker bumps security_version after signing (the exact
         # attack anti-downgrade + signing together are meant to prevent).
-        tampered_canonical = sign_manifest.build_canonical_string({
-            "hw_compat": manifest["hw_compat"], "version": manifest["version"],
-            "security_version": 999,  # tampered
-            "schema_version": manifest["schema_version"],
-            "image_size": manifest["image_size"], "image_sha256": manifest["image_sha256"],
-            "image_url": manifest["url"], "channel": manifest["channel"],
-            "issued_at": manifest["issued_at"], "expires_at": manifest["expires_at"],
-            "manifest_id": manifest["manifest_id"],
-        })
+        tampered_canonical = sign_manifest.build_canonical_string(
+            {
+                "hw_compat": manifest["hw_compat"],
+                "version": manifest["version"],
+                "security_version": 999,  # tampered
+                "schema_version": manifest["schema_version"],
+                "image_size": manifest["image_size"],
+                "image_sha256": manifest["image_sha256"],
+                "image_url": manifest["url"],
+                "channel": manifest["channel"],
+                "issued_at": manifest["issued_at"],
+                "expires_at": manifest["expires_at"],
+                "manifest_id": manifest["manifest_id"],
+            }
+        )
         sig = base64.b64decode(manifest["signature"])
         with self.assertRaises(InvalidSignature):
             pub.verify(sig, tampered_canonical.encode("utf-8"), ec.ECDSA(hashes.SHA256()))
 
     def test_image_hash_is_the_real_sha256_of_the_image_file(self):
         import hashlib
+
         with open(self.image_path, "rb") as f:
             expected = hashlib.sha256(f.read()).hexdigest()
-        priv = self._gen_key()
+        # Generates the key file at self.key_path, which Args.private_key
+        # below points at; the returned object itself is not needed here.
+        self._gen_key()
 
         class Args:
             private_key = self.key_path
@@ -189,6 +220,7 @@ class SignManifestToolTests(unittest.TestCase):
 
         sign_manifest.sign_manifest(Args())
         import json
+
         with open(Args.out) as f:
             manifest = json.load(f)
         self.assertEqual(manifest["image_sha256"], expected)

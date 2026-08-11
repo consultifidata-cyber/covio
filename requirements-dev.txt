@@ -3,13 +3,19 @@
 # needed to actually RUN server.py (see README.md's own `pip install flask`
 # instruction for that). Install with: pip install -r requirements-dev.txt
 #
-# Version left as a loose lower-bound rather than an exact pin: no Python
-# interpreter/pip has been available in any environment this project has
-# been developed in so far (see VERSIONS.md), so an exact pin here would be
-# an unverified guess. To be tightened to an exact, CI-verified version
-# once RE-4's CI runner (which does have Python preinstalled) actually
-# installs and runs this for the first time.
-ruff>=0.6.0
+# EXACT PIN, and it has to stay exact. ruff is a BLOCKING gate, and every
+# ruff release can add or tighten lint rules -- with a `>=` bound, a routine
+# upstream release turns CI red across the whole repo without a single line
+# of this project's code changing. That is precisely what happened before:
+# the gate was configured but never executed, and by the time it first ran
+# it reported 70 violations and skipped the Publish Release job, so no
+# release was ever published by CI.
+#
+# Verified: the tree is clean under `ruff check server/ test/native/` AND
+# `ruff format --check` at this exact version. Bump deliberately, re-run
+# both, and fix whatever the new version finds -- never widen the bound to
+# make a failure go away.
+ruff==0.16.2
 
 # RISK-16 remediation (OTA manifest authenticity): server/tools/sign_manifest.py
 # (release-signing tool, never shipped in firmware) and its test,

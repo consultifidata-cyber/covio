@@ -15,9 +15,9 @@ Run:
 or simply:
     python test/native/test_dm_phase_6_logical_id.py
 """
+
 import json
 import os
-import re
 import sys
 import tempfile
 import unittest
@@ -27,7 +27,6 @@ import server  # noqa: E402
 
 
 class DmPhase6LogicalIdTests(unittest.TestCase):
-
     def setUp(self):
         self._tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self._tmp.close()
@@ -76,7 +75,8 @@ class DmPhase6LogicalIdTests(unittest.TestCase):
         c = server.db()
         n = c.execute(
             "SELECT COUNT(*) AS n FROM schema_migrations WHERE version=?",
-            (server.DEVICES_SCHEMA_VERSION_LOGICAL_ID,)).fetchone()["n"]
+            (server.DEVICES_SCHEMA_VERSION_LOGICAL_ID,),
+        ).fetchone()["n"]
         c.close()
         self.assertEqual(n, 1)
 
@@ -85,10 +85,13 @@ class DmPhase6LogicalIdTests(unittest.TestCase):
         # logical_device_id yet) and confirm re-running init_db() adds it
         # without disturbing existing data.
         c = server.db()
-        c.execute("DELETE FROM schema_migrations WHERE version=?",
-                  (server.DEVICES_SCHEMA_VERSION_LOGICAL_ID,))
+        c.execute(
+            "DELETE FROM schema_migrations WHERE version=?",
+            (server.DEVICES_SCHEMA_VERSION_LOGICAL_ID,),
+        )
         c.execute("UPDATE devices SET asset_label='keep-me' WHERE device_id='legacy-default-key'")
-        c.commit(); c.close()
+        c.commit()
+        c.close()
 
         server.init_db()
 
@@ -149,8 +152,9 @@ class DmPhase6LogicalIdTests(unittest.TestCase):
     def test_provision_event_records_the_allocated_logical_device_id(self):
         r = self._provision("device-E", asset_label="Test Rig 1")
         logical_id = r.get_json()["logical_device_id"]
-        events = self.client.get("/admin/devices/device-E/events",
-                                  auth=self._admin_auth()).get_json()["events"]
+        events = self.client.get(
+            "/admin/devices/device-E/events", auth=self._admin_auth()
+        ).get_json()["events"]
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["event_type"], "DEVICE_PROVISIONED")
         self.assertEqual(events[0]["detail"]["logical_device_id"], logical_id)

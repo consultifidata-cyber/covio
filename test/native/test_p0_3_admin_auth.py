@@ -12,22 +12,24 @@ Run:
 or simply:
     python test/native/test_p0_3_admin_auth.py
 """
+
 import base64
 import json
 import os
 import sys
 import tempfile
-import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "server"))
 import server  # noqa: E402
 
-
 ADMIN_ROUTES_ADMIN_ROLE = [
     ("POST", "/admin/kfactor", {"data": {"k_factor": "1000", "density": "0.84", "t_ref": "15"}}),
-    ("POST", "/admin/devices/provision", {"data": json.dumps({"device_id": "d1"}),
-                                           "content_type": "application/json"}),
+    (
+        "POST",
+        "/admin/devices/provision",
+        {"data": json.dumps({"device_id": "d1"}), "content_type": "application/json"},
+    ),
     ("POST", "/admin/devices/some-device/revoke-key", {}),
     ("POST", "/admin/devices/some-device/rotate-key", {}),
 ]
@@ -87,8 +89,12 @@ class P0_3_AdminAuthTests(unittest.TestCase):
         try:
             for method, path, kwargs in ADMIN_ROUTES_ADMIN_ROLE:
                 with self.subTest(route=path):
-                    resp = self._call(method, path, auth=("viewer", "viewer-secret-for-test"), **kwargs)
-                    self.assertEqual(resp.status_code, 401, f"{path} accepted a viewer-role credential")
+                    resp = self._call(
+                        method, path, auth=("viewer", "viewer-secret-for-test"), **kwargs
+                    )
+                    self.assertEqual(
+                        resp.status_code, 401, f"{path} accepted a viewer-role credential"
+                    )
         finally:
             server.VIEWER_PASSWORD = None
 
@@ -97,8 +103,12 @@ class P0_3_AdminAuthTests(unittest.TestCase):
         try:
             for method, path, kwargs in ADMIN_ROUTES_VIEWER_OK:
                 with self.subTest(route=path):
-                    resp = self._call(method, path, auth=("viewer", "viewer-secret-for-test"), **kwargs)
-                    self.assertNotEqual(resp.status_code, 401, f"{path} rejected a valid viewer credential")
+                    resp = self._call(
+                        method, path, auth=("viewer", "viewer-secret-for-test"), **kwargs
+                    )
+                    self.assertNotEqual(
+                        resp.status_code, 401, f"{path} rejected a valid viewer credential"
+                    )
         finally:
             server.VIEWER_PASSWORD = None
 
@@ -108,7 +118,9 @@ class P0_3_AdminAuthTests(unittest.TestCase):
         for method, path, kwargs in ADMIN_ROUTES_ADMIN_ROLE + ADMIN_ROUTES_VIEWER_OK:
             with self.subTest(route=path):
                 resp = self._call(method, path, auth=auth, **kwargs)
-                self.assertNotEqual(resp.status_code, 401, f"{path} rejected a valid admin credential")
+                self.assertNotEqual(
+                    resp.status_code, 401, f"{path} rejected a valid admin credential"
+                )
 
     # ---- 4. wrong admin password rejected -------------------------------------
     def test_wrong_admin_password_rejected(self):
@@ -136,13 +148,17 @@ class P0_3_AdminAuthTests(unittest.TestCase):
         for _ in range(server.ADMIN_RATE_LIMIT_MAX_FAILURES):
             server._record_admin_auth_failure("1.2.3.4")
         self.assertTrue(server._admin_rate_limited("1.2.3.4"))
-        self.assertFalse(server._admin_rate_limited("5.6.7.8"), "rate limit leaked across source addresses")
+        self.assertFalse(
+            server._admin_rate_limited("5.6.7.8"), "rate limit leaked across source addresses"
+        )
 
     # ---- 6. every failed AND successful sensitive operation is audited ------
     def test_failed_admin_auth_is_recorded_in_device_events(self):
         self._call("GET", "/admin/devices", auth=("admin", "wrong"))
         c = server.db()
-        rows = c.execute("SELECT event_type FROM device_events WHERE event_type='ADMIN_AUTH_FAILED'").fetchall()
+        rows = c.execute(
+            "SELECT event_type FROM device_events WHERE event_type='ADMIN_AUTH_FAILED'"
+        ).fetchall()
         c.close()
         self.assertGreaterEqual(len(rows), 1)
 
@@ -151,10 +167,16 @@ class P0_3_AdminAuthTests(unittest.TestCase):
         # (DM-Phase 4) -- confirm they still fire now that auth wraps them
         # (i.e. the decorator does not swallow or short-circuit the view).
         auth = ("admin", server.ADMIN_PASSWORD)
-        self.client.post("/admin/devices/provision", data=json.dumps({"device_id": "d1"}),
-                          content_type="application/json", auth=auth)
+        self.client.post(
+            "/admin/devices/provision",
+            data=json.dumps({"device_id": "d1"}),
+            content_type="application/json",
+            auth=auth,
+        )
         c = server.db()
-        rows = c.execute("SELECT event_type FROM device_events WHERE event_type='DEVICE_PROVISIONED'").fetchall()
+        rows = c.execute(
+            "SELECT event_type FROM device_events WHERE event_type='DEVICE_PROVISIONED'"
+        ).fetchall()
         c.close()
         self.assertEqual(len(rows), 1)
 
@@ -168,19 +190,27 @@ class P0_3_AdminAuthTests(unittest.TestCase):
             with self.subTest(bad_password=bad):
                 with self.assertRaises(RuntimeError):
                     server._resolve_admin_credentials(
-                        env={"COVIO_ADMIN_MODE": "production", "COVIO_ADMIN_PASSWORD": bad})
+                        env={"COVIO_ADMIN_MODE": "production", "COVIO_ADMIN_PASSWORD": bad}
+                    )
 
     def test_production_mode_with_a_real_password_starts_cleanly(self):
         creds = server._resolve_admin_credentials(
-            env={"COVIO_ADMIN_MODE": "production", "COVIO_ADMIN_PASSWORD": "a-real-random-secret-value"})
+            env={
+                "COVIO_ADMIN_MODE": "production",
+                "COVIO_ADMIN_PASSWORD": "a-real-random-secret-value",
+            }
+        )
         self.assertEqual(creds["admin_password"], "a-real-random-secret-value")
 
     def test_dev_mode_with_no_password_set_generates_one_never_a_hardcoded_default(self):
         creds1 = server._resolve_admin_credentials(env={})
         creds2 = server._resolve_admin_credentials(env={})
         self.assertTrue(creds1.get("_generated"))
-        self.assertNotEqual(creds1["admin_password"], creds2["admin_password"],
-                             "dev-mode generated password must not be a fixed/shared constant")
+        self.assertNotEqual(
+            creds1["admin_password"],
+            creds2["admin_password"],
+            "dev-mode generated password must not be a fixed/shared constant",
+        )
 
     # ---- 8. secrets are never returned in plaintext by an admin route -------
     def test_admin_routes_never_echo_the_admin_password_itself(self):
@@ -190,9 +220,11 @@ class P0_3_AdminAuthTests(unittest.TestCase):
     # ---- 9. Basic-Auth header for a browser <form> POST works end-to-end ----
     def test_kfactor_form_post_authenticates_via_basic_auth_header(self):
         headers = self._basic_header("admin", server.ADMIN_PASSWORD)
-        resp = self.client.post("/admin/kfactor",
-                                 data={"k_factor": "1234.5", "density": "0.9", "t_ref": "20"},
-                                 headers=headers)
+        resp = self.client.post(
+            "/admin/kfactor",
+            data={"k_factor": "1234.5", "density": "0.9", "t_ref": "20"},
+            headers=headers,
+        )
         self.assertEqual(resp.status_code, 303)  # redirect back to dashboard, per existing behavior
         c = server.db()
         row = c.execute("SELECT k_factor FROM calibration WHERE id=1").fetchone()

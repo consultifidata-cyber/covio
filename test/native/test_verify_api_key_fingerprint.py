@@ -12,6 +12,7 @@ function returns whatever it returns.
 Run:
     python -m unittest discover -s test/native -v
 """
+
 import hashlib
 import os
 import sys

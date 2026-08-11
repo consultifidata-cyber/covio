@@ -51,9 +51,17 @@ Run:
     python server.py
     # device DEFAULT_SERVER_URL should point at http://<this-host>:8000
 """
-import functools, hashlib, secrets, sqlite3, json, time, os
+
+import functools
+import hashlib
+import json
+import os
+import secrets
+import sqlite3
+import time
 from collections import defaultdict, deque
-from flask import Flask, request, jsonify, Response, send_from_directory
+
+from flask import Flask, Response, jsonify, request, send_from_directory
 
 DB = os.path.join(os.path.dirname(__file__), "covio.db")
 app = Flask(__name__)
@@ -141,8 +149,12 @@ def _resolve_admin_credentials(env=None):
     if admin_pw is None:
         admin_pw = secrets.token_urlsafe(18)
         generated = True
-    return {"mode": mode, "admin_password": admin_pw, "viewer_password": viewer_pw,
-            "_generated": generated}
+    return {
+        "mode": mode,
+        "admin_password": admin_pw,
+        "viewer_password": viewer_pw,
+        "_generated": generated,
+    }
 
 
 _admin_creds = _resolve_admin_credentials()
@@ -150,8 +162,10 @@ ADMIN_MODE = _admin_creds["mode"]
 ADMIN_PASSWORD = _admin_creds["admin_password"]
 VIEWER_PASSWORD = _admin_creds["viewer_password"]
 if _admin_creds.get("_generated"):
-    print("[ADMIN] no COVIO_ADMIN_PASSWORD set -- generated a random dev "
-          "admin password for this process only (username 'admin'):")
+    print(
+        "[ADMIN] no COVIO_ADMIN_PASSWORD set -- generated a random dev "
+        "admin password for this process only (username 'admin'):"
+    )
     print("[ADMIN]   %s" % ADMIN_PASSWORD)
     print("[ADMIN] set COVIO_ADMIN_PASSWORD to pin a stable value across restarts.")
 
@@ -192,8 +206,12 @@ def require_admin(role="admin"):
         def wrapped(*args, **kwargs):
             remote_addr = request.remote_addr or "unknown"
             if _admin_rate_limited(remote_addr):
-                return jsonify(error={"code": "RATE_LIMITED",
-                                       "message": "Too many failed admin auth attempts; try again shortly."}), 429
+                return jsonify(
+                    error={
+                        "code": "RATE_LIMITED",
+                        "message": "Too many failed admin auth attempts; try again shortly.",
+                    }
+                ), 429
 
             auth = request.authorization
             ok = False
@@ -206,18 +224,33 @@ def require_admin(role="admin"):
             if not ok:
                 _record_admin_auth_failure(remote_addr)
                 c = db()
-                record_event(c, None, "ADMIN_AUTH_FAILED", "WARNING",
-                             "Rejected admin request: missing/invalid credentials.",
-                             {"path": request.path, "remote_addr": remote_addr})
-                c.commit(); c.close()
+                record_event(
+                    c,
+                    None,
+                    "ADMIN_AUTH_FAILED",
+                    "WARNING",
+                    "Rejected admin request: missing/invalid credentials.",
+                    {"path": request.path, "remote_addr": remote_addr},
+                )
+                c.commit()
+                c.close()
                 return Response(
-                    jsonify(error={"code": "ADMIN_AUTH_REQUIRED",
-                                   "message": "Valid admin credentials required."}).get_data(),
-                    status=401, mimetype="application/json",
-                    headers={"WWW-Authenticate": 'Basic realm="Covio Admin"'})
+                    jsonify(
+                        error={
+                            "code": "ADMIN_AUTH_REQUIRED",
+                            "message": "Valid admin credentials required.",
+                        }
+                    ).get_data(),
+                    status=401,
+                    mimetype="application/json",
+                    headers={"WWW-Authenticate": 'Basic realm="Covio Admin"'},
+                )
             return fn(*args, **kwargs)
+
         return wrapped
+
     return decorator
+
 
 # ---- ADR-001: schema/record-type acceptance rule (frozen, do not soften) ----
 # Per ACR-001: "previous" is only a real, accepted version once a second
@@ -226,12 +259,13 @@ def require_admin(role="admin"):
 # — the pre-ADR-001 unversioned layout is retired via forced-drain, not
 # accepted here (ADR-001 Migration Strategy), matches SCHEMA_VERSION_CURRENT
 # in queue.h.
-CURRENT_SCHEMA_VERSION  = 1
+CURRENT_SCHEMA_VERSION = 1
 PREVIOUS_SCHEMA_VERSION = CURRENT_SCHEMA_VERSION - 1 if CURRENT_SCHEMA_VERSION > 1 else None
 ACCEPTED_SCHEMA_VERSIONS = {CURRENT_SCHEMA_VERSION} | (
-    {PREVIOUS_SCHEMA_VERSION} if PREVIOUS_SCHEMA_VERSION is not None else set())
+    {PREVIOUS_SCHEMA_VERSION} if PREVIOUS_SCHEMA_VERSION is not None else set()
+)
 
-RECORD_TYPE_TELEMETRY = 1       # matches RECORD_TYPE_TELEMETRY in queue.h
+RECORD_TYPE_TELEMETRY = 1  # matches RECORD_TYPE_TELEMETRY in queue.h
 KNOWN_RECORD_TYPES = {RECORD_TYPE_TELEMETRY}
 
 # ---- DM-Phase 0B (Covio_Device_Manager_Live_Readiness_Plan.md, P0 Backend
@@ -275,12 +309,13 @@ def require_api_key():
     """
     key = request.headers.get("X-Api-Key")
     if not key:
-        return jsonify(error={"code": "MISSING_API_KEY",
-                               "message": "X-Api-Key header is required"}), 401
+        return jsonify(
+            error={"code": "MISSING_API_KEY", "message": "X-Api-Key header is required"}
+        ), 401
     c = db()
     row = c.execute(
-        "SELECT device_id, revoked FROM devices WHERE api_key_hash=?",
-        (hash_api_key(key),)).fetchone()
+        "SELECT device_id, revoked FROM devices WHERE api_key_hash=?", (hash_api_key(key),)
+    ).fetchone()
     if row is None or row["revoked"]:
         # DM-Phase 4 (§11.4 API_AUTH_FAILED): a side effect only, added
         # here rather than at each of the three call sites -- this does
@@ -290,20 +325,28 @@ def require_api_key():
         # on. device_id is attributed when resolvable (a revoked key is
         # still tied to a known row); an unrecognized key's device_id is
         # genuinely unknown, recorded as NULL rather than guessed.
-        record_event(c, row["device_id"] if row else None, "API_AUTH_FAILED", "WARNING",
-                     "Rejected request with a missing, unrecognized, or revoked API key.")
+        record_event(
+            c,
+            row["device_id"] if row else None,
+            "API_AUTH_FAILED",
+            "WARNING",
+            "Rejected request with a missing, unrecognized, or revoked API key.",
+        )
         c.commit()
         c.close()
-        return jsonify(error={"code": "INVALID_API_KEY",
-                               "message": "API key is unrecognized or revoked"}), 401
+        return jsonify(
+            error={"code": "INVALID_API_KEY", "message": "API key is unrecognized or revoked"}
+        ), 401
     c.close()
     return None
+
 
 # ---------------------------------------------------------------- db helpers
 def db():
     c = sqlite3.connect(DB)
     c.row_factory = sqlite3.Row
     return c
+
 
 def init_db():
     c = db()
@@ -374,7 +417,8 @@ def init_db():
         id            INTEGER PRIMARY KEY AUTOINCREMENT,
         device_id     TEXT,
         event_type    TEXT NOT NULL,
-        severity      TEXT NOT NULL,   -- INFO | WARNING | CRITICAL (§13 A.4 alarm_severity convention, reused)
+        -- INFO | WARNING | CRITICAL (§13 A.4 alarm_severity convention, reused)
+        severity      TEXT NOT NULL,
         message       TEXT NOT NULL,
         detail_json   TEXT,
         created_at_ms INTEGER NOT NULL
@@ -404,11 +448,12 @@ def init_db():
     # still exactly what's written; the new Twin/registry columns simply
     # default to NULL for this synthetic, non-per-device row.
     c.execute(
-        "INSERT OR IGNORE INTO devices (device_id, api_key_hash, revoked) "
-        "VALUES (?, ?, 0)",
-        ("legacy-default-key", hash_api_key(BOOTSTRAP_DEFAULT_API_KEY)))
+        "INSERT OR IGNORE INTO devices (device_id, api_key_hash, revoked) VALUES (?, ?, 0)",
+        ("legacy-default-key", hash_api_key(BOOTSTRAP_DEFAULT_API_KEY)),
+    )
 
-    c.commit(); c.close()
+    c.commit()
+    c.close()
 
 
 # DM-Phase 4: bump this whenever the `devices` table's shape changes again;
@@ -427,9 +472,10 @@ DEVICES_SCHEMA_VERSION_LOGICAL_ID = 3
 
 
 def _table_exists(c, name):
-    return c.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
-    ).fetchone() is not None
+    return (
+        c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone()
+        is not None
+    )
 
 
 def _column_names(c, table):
@@ -452,7 +498,9 @@ def _migrate_devices_table(c):
     if already:
         return
 
-    needs_migration = _table_exists(c, "devices") and "asset_label" not in _column_names(c, "devices")
+    needs_migration = _table_exists(c, "devices") and "asset_label" not in _column_names(
+        c, "devices"
+    )
     fresh_install = not _table_exists(c, "devices")
 
     if needs_migration or fresh_install:
@@ -507,13 +555,17 @@ def _migrate_devices_table(c):
             """)
 
             if needs_migration:
-                old_rows = c.execute("SELECT device_id, api_key_hash, revoked FROM devices").fetchall()
+                old_rows = c.execute(
+                    "SELECT device_id, api_key_hash, revoked FROM devices"
+                ).fetchall()
                 carried = 0
                 for row in old_rows:
                     try:
                         c.execute(
-                            "INSERT INTO devices_new (device_id, api_key_hash, revoked) VALUES (?, ?, ?)",
-                            (row["device_id"], row["api_key_hash"], row["revoked"]))
+                            "INSERT INTO devices_new (device_id, api_key_hash, revoked) "
+                            "VALUES (?, ?, ?)",
+                            (row["device_id"], row["api_key_hash"], row["revoked"]),
+                        )
                         carried += 1
                     except sqlite3.IntegrityError as e:
                         # device_id had no uniqueness constraint pre-DM-Phase-4;
@@ -522,11 +574,16 @@ def _migrate_devices_table(c):
                         # practice) but is logged loudly, never silently
                         # dropped, matching this file's own quarantine
                         # convention above.
-                        print("[migrate] WARNING: dropped conflicting devices row "
-                              "device_id=%r during DM-Phase 4 migration: %s" % (row["device_id"], e))
+                        print(
+                            "[migrate] WARNING: dropped conflicting devices row "
+                            "device_id=%r during DM-Phase 4 migration: %s" % (row["device_id"], e)
+                        )
                 if carried != len(old_rows):
-                    print("[migrate] WARNING: %d of %d pre-DM-Phase-4 devices rows could not be "
-                          "carried forward -- review manually if unexpected" % (len(old_rows) - carried, len(old_rows)))
+                    print(
+                        "[migrate] WARNING: %d of %d pre-DM-Phase-4 devices rows could not be "
+                        "carried forward -- review manually if unexpected"
+                        % (len(old_rows) - carried, len(old_rows))
+                    )
                 c.execute("DROP TABLE devices")
 
             c.execute("ALTER TABLE devices_new RENAME TO devices")
@@ -535,8 +592,10 @@ def _migrate_devices_table(c):
             c.rollback()
             raise
 
-    c.execute("INSERT OR IGNORE INTO schema_migrations (version, applied_at_ms) VALUES (?, ?)",
-              (DEVICES_SCHEMA_VERSION, int(time.time() * 1000)))
+    c.execute(
+        "INSERT OR IGNORE INTO schema_migrations (version, applied_at_ms) VALUES (?, ?)",
+        (DEVICES_SCHEMA_VERSION, int(time.time() * 1000)),
+    )
 
 
 def _migrate_logical_device_id_column(c):
@@ -551,8 +610,8 @@ def _migrate_logical_device_id_column(c):
     exactly ADR-018's own "null until assigned at factory commissioning"
     semantics."""
     already = c.execute(
-        "SELECT 1 FROM schema_migrations WHERE version=?",
-        (DEVICES_SCHEMA_VERSION_LOGICAL_ID,)).fetchone()
+        "SELECT 1 FROM schema_migrations WHERE version=?", (DEVICES_SCHEMA_VERSION_LOGICAL_ID,)
+    ).fetchone()
     if already:
         return
 
@@ -560,9 +619,12 @@ def _migrate_logical_device_id_column(c):
         c.execute("ALTER TABLE devices ADD COLUMN logical_device_id TEXT")
     c.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_logical_device_id "
-        "ON devices(logical_device_id)")
-    c.execute("INSERT OR IGNORE INTO schema_migrations (version, applied_at_ms) VALUES (?, ?)",
-              (DEVICES_SCHEMA_VERSION_LOGICAL_ID, int(time.time() * 1000)))
+        "ON devices(logical_device_id)"
+    )
+    c.execute(
+        "INSERT OR IGNORE INTO schema_migrations (version, applied_at_ms) VALUES (?, ?)",
+        (DEVICES_SCHEMA_VERSION_LOGICAL_ID, int(time.time() * 1000)),
+    )
     c.commit()
 
 
@@ -601,8 +663,9 @@ def resolve_device_id_from_key():
     if not key:
         return None
     c = db()
-    row = c.execute("SELECT device_id FROM devices WHERE api_key_hash=?",
-                     (hash_api_key(key),)).fetchone()
+    row = c.execute(
+        "SELECT device_id FROM devices WHERE api_key_hash=?", (hash_api_key(key),)
+    ).fetchone()
     c.close()
     return row["device_id"] if row else None
 
@@ -619,9 +682,12 @@ def touch_last_seen(device_id):
     if not device_id:
         return
     c = db()
-    c.execute("UPDATE devices SET last_seen_ms=?, derived_health_state=? WHERE device_id=?",
-              (int(time.time() * 1000), "ok", device_id))
-    c.commit(); c.close()
+    c.execute(
+        "UPDATE devices SET last_seen_ms=?, derived_health_state=? WHERE device_id=?",
+        (int(time.time() * 1000), "ok", device_id),
+    )
+    c.commit()
+    c.close()
 
 
 def derive_health_state(last_seen_ms):
@@ -633,7 +699,9 @@ def derive_health_state(last_seen_ms):
     if last_seen_ms is None:
         return "unknown"
     age_ms = int(time.time() * 1000) - last_seen_ms
-    return "offline" if age_ms > 300000 else "ok"  # 300000ms/5min, matching §13 A.4's own offline threshold
+    return (
+        "offline" if age_ms > 300000 else "ok"
+    )  # 300000ms/5min, matching §13 A.4's own offline threshold
 
 
 def record_event(c, device_id, event_type, severity, message, detail=None):
@@ -645,11 +713,18 @@ def record_event(c, device_id, event_type, severity, message, detail=None):
     commits its own) so an event write is always atomic with whatever
     change it is recording -- never partially applied."""
     c.execute(
-        "INSERT INTO device_events (device_id, event_type, severity, message, detail_json, created_at_ms) "
+        "INSERT INTO device_events "
+        "(device_id, event_type, severity, message, detail_json, created_at_ms) "
         "VALUES (?, ?, ?, ?, ?, ?)",
-        (device_id, event_type, severity, message,
-         json.dumps(detail) if detail is not None else None,
-         int(time.time() * 1000)))
+        (
+            device_id,
+            event_type,
+            severity,
+            message,
+            json.dumps(detail) if detail is not None else None,
+            int(time.time() * 1000),
+        ),
+    )
 
 
 def _event_to_dict(row):
@@ -672,6 +747,7 @@ def generate_api_key():
     scale."""
     return secrets.token_hex(24)  # 192 bits
 
+
 # ------------------------------------------------------------- push endpoint
 @app.route("/api/iot/flow/push", methods=["POST"])
 def push():
@@ -686,10 +762,10 @@ def push():
     c = db()
     now_ms = int(time.time() * 1000)
     accepted_totals = []  # DM-Phase 4 Twin sync: only records that actually
-                           # pass the ADR-001 acceptance rule below may feed
-                           # last_push_totalizer -- a quarantined record's
-                           # totalizer is unvalidated data and must never
-                           # reach the Twin.
+    # pass the ADR-001 acceptance rule below may feed
+    # last_push_totalizer -- a quarantined record's
+    # totalizer is unvalidated data and must never
+    # reach the Twin.
     # P0-1 remediation (RISK-01): every seq permanently quarantined THIS call
     # is collected here so the response can (a) tell the caller/operator
     # exactly what happened to it (mandate requirement: "the server must
@@ -718,11 +794,12 @@ def push():
         if reason:
             # Quarantine, never crash, never silently drop, never fall back
             # to a guessed interpretation of the record.
-            c.execute("""INSERT OR IGNORE INTO quarantined_records
+            c.execute(
+                """INSERT OR IGNORE INTO quarantined_records
                 (device_id,boot_id,seq,schema_version,record_type,reason,raw_json,recv_ms)
                 VALUES (?,?,?,?,?,?,?,?)""",
-                (dev, r.get("boot_id"), r.get("seq"), sv, rt,
-                 reason, json.dumps(r), now_ms))
+                (dev, r.get("boot_id"), r.get("seq"), sv, rt, reason, json.dumps(r), now_ms),
+            )
             if r.get("seq") is not None:
                 newly_quarantined.append({"seq": r.get("seq"), "reason": reason})
             continue
@@ -734,22 +811,45 @@ def push():
         try:
             boot_id, seq, ts, totalizer = r["boot_id"], r["seq"], r["ts"], r["totalizer"]
         except KeyError as e:
-            c.execute("""INSERT OR IGNORE INTO quarantined_records
+            c.execute(
+                """INSERT OR IGNORE INTO quarantined_records
                 (device_id,boot_id,seq,schema_version,record_type,reason,raw_json,recv_ms)
                 VALUES (?,?,?,?,?,?,?,?)""",
-                (dev, r.get("boot_id"), r.get("seq"), sv, rt,
-                 "missing_field:%s" % e, json.dumps(r), now_ms))
+                (
+                    dev,
+                    r.get("boot_id"),
+                    r.get("seq"),
+                    sv,
+                    rt,
+                    "missing_field:%s" % e,
+                    json.dumps(r),
+                    now_ms,
+                ),
+            )
             if r.get("seq") is not None:
                 newly_quarantined.append({"seq": r.get("seq"), "reason": "missing_field:%s" % e})
             continue
 
         # INSERT OR IGNORE = idempotent: duplicate (dev,boot,seq) is a no-op.
-        c.execute("""INSERT OR IGNORE INTO records
+        c.execute(
+            """INSERT OR IGNORE INTO records
             (device_id,boot_id,seq,ts,totalizer,quality,rssi,recv_ms,kfactor_version,
              schema_version,record_type)
             VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-            (dev, boot_id, seq, ts, totalizer,
-             r.get("quality",0), r.get("rssi",0), now_ms, kver, sv, rt))
+            (
+                dev,
+                boot_id,
+                seq,
+                ts,
+                totalizer,
+                r.get("quality", 0),
+                r.get("rssi", 0),
+                now_ms,
+                kver,
+                sv,
+                rt,
+            ),
+        )
         if isinstance(totalizer, (int, float)):
             accepted_totals.append(totalizer)
 
@@ -772,10 +872,14 @@ def push():
     # single root cause) -- full detail (every seq+reason) is in detail_json,
     # already visible via GET /admin/events and /admin/devices/<id>/events.
     if newly_quarantined:
-        record_event(c, dev, "RECORDS_QUARANTINED", "WARNING",
-                     "%d record(s) permanently quarantined this push (see detail)."
-                     % len(newly_quarantined),
-                     {"quarantined": newly_quarantined})
+        record_event(
+            c,
+            dev,
+            "RECORDS_QUARANTINED",
+            "WARNING",
+            "%d record(s) permanently quarantined this push (see detail)." % len(newly_quarantined),
+            {"quarantined": newly_quarantined},
+        )
 
     fw = body.get("fw")
     last_totalizer = max(accepted_totals) if accepted_totals else None
@@ -785,7 +889,8 @@ def push():
         "last_kfactor_version=?, last_seen_ms=?, "
         "last_push_totalizer=COALESCE(?, last_push_totalizer), derived_health_state='ok' "
         "WHERE device_id=?",
-        (fw, kver, now_ms, last_totalizer, dev))
+        (fw, kver, now_ms, last_totalizer, dev),
+    )
     if cur.rowcount == 0:
         # First time this device_id has ever pushed -- the registry row is
         # created here from the push's own claimed identity, independent of
@@ -794,7 +899,8 @@ def push():
         c.execute(
             "INSERT INTO devices (device_id, last_fw_version, last_kfactor_version, "
             "last_seen_ms, last_push_totalizer, derived_health_state) VALUES (?, ?, ?, ?, ?, 'ok')",
-            (dev, fw, kver, now_ms, last_totalizer))
+            (dev, fw, kver, now_ms, last_totalizer),
+        )
 
     c.commit()
 
@@ -834,7 +940,8 @@ def push():
         "UNION "
         "SELECT seq FROM quarantined_records WHERE device_id=? AND seq IS NOT NULL "
         "ORDER BY seq",
-        (dev, dev)).fetchall()
+        (dev, dev),
+    ).fetchall()
     contig = 0
     for row in rows:
         if row["seq"] == contig + 1:
@@ -855,6 +962,7 @@ def push():
         resp["quarantined"] = newly_quarantined
     return jsonify(**resp)
 
+
 # ------------------------------------------------------------ config endpoint
 @app.route("/api/iot/flow/config", methods=["GET"])
 def config():
@@ -870,8 +978,10 @@ def config():
     c = db()
     row = c.execute("SELECT * FROM calibration WHERE id=1").fetchone()
     c.close()
-    return jsonify(K_factor=row["k_factor"], density=row["density"],
-                   T_ref=row["t_ref"], version=row["version"])
+    return jsonify(
+        K_factor=row["k_factor"], density=row["density"], T_ref=row["t_ref"], version=row["version"]
+    )
+
 
 # ------------------------------------------------------------ OTA manifest
 # The manifest is a FILE you edit: server/firmware/manifest.json.
@@ -897,21 +1007,26 @@ def config():
 FW_DIR = os.path.join(os.path.dirname(__file__), "firmware")
 os.makedirs(FW_DIR, exist_ok=True)
 
+
 @app.route("/api/iot/flow/ota/manifest", methods=["GET"])
 def ota_manifest():
     auth_error = require_api_key()
     if auth_error:
         return auth_error
-    touch_last_seen(resolve_device_id_from_key())  # DM-Phase 4: see config()'s identical comment above
+    touch_last_seen(
+        resolve_device_id_from_key()
+    )  # DM-Phase 4: see config()'s identical comment above
     mf = os.path.join(FW_DIR, "manifest.json")
     if os.path.exists(mf):
         with open(mf) as f:
             return Response(f.read(), mimetype="application/json")
-    return jsonify(version="", url="")     # empty => firmware treats as no-op
+    return jsonify(version="", url="")  # empty => firmware treats as no-op
+
 
 @app.route("/firmware/<path:fname>", methods=["GET"])
 def firmware_file(fname):
     return send_from_directory(FW_DIR, fname)
+
 
 # ------------------------------------------------- DM-Phase 4: registration workflow
 # POST /admin/devices/provision -- §6/§8: generates and returns a fresh,
@@ -935,7 +1050,9 @@ def provision_device():
     device_id = body.get("device_id")
     asset_label = body.get("asset_label")
     if not device_id:
-        return jsonify(error={"code": "DEVICE_ID_REQUIRED", "message": "device_id is required"}), 400
+        return jsonify(
+            error={"code": "DEVICE_ID_REQUIRED", "message": "device_id is required"}
+        ), 400
 
     api_key = generate_api_key()
     key_hash = hash_api_key(api_key)
@@ -948,17 +1065,21 @@ def provision_device():
     # provisioning status) -- this mints/replaces ITS OWN dedicated key
     # without disturbing any Twin "current" fields already recorded.
     existing = c.execute(
-        "SELECT device_id, logical_device_id FROM devices WHERE device_id=?", (device_id,)).fetchone()
+        "SELECT device_id, logical_device_id FROM devices WHERE device_id=?", (device_id,)
+    ).fetchone()
     if existing:
         c.execute(
             "UPDATE devices SET api_key_hash=?, asset_label=COALESCE(?, asset_label), "
             "revoked=0, provisioned_at_ms=? WHERE device_id=?",
-            (key_hash, asset_label, now_ms, device_id))
+            (key_hash, asset_label, now_ms, device_id),
+        )
     else:
         c.execute(
-            "INSERT INTO devices (device_id, api_key_hash, asset_label, revoked, provisioned_at_ms) "
+            "INSERT INTO devices "
+            "(device_id, api_key_hash, asset_label, revoked, provisioned_at_ms) "
             "VALUES (?, ?, ?, 0, ?)",
-            (device_id, key_hash, asset_label, now_ms))
+            (device_id, key_hash, asset_label, now_ms),
+        )
 
     # DM-Phase 6 (§11.2/ADR-018): allocate a Logical Device ID exactly once
     # per physical unit -- an already-provisioned device (e.g. a routine key
@@ -969,18 +1090,30 @@ def provision_device():
     logical_device_id = existing["logical_device_id"] if existing else None
     if not logical_device_id:
         logical_device_id = allocate_logical_device_id(c)
-        c.execute("UPDATE devices SET logical_device_id=? WHERE device_id=?",
-                  (logical_device_id, device_id))
+        c.execute(
+            "UPDATE devices SET logical_device_id=? WHERE device_id=?",
+            (logical_device_id, device_id),
+        )
 
     # §8 acceptance criteria: "a newly commissioned device's key is unique
     # and traceable to a provisioning event" -- this event row is that trace.
-    record_event(c, device_id, "DEVICE_PROVISIONED", "INFO",
-                 "Device provisioned with a new unique API key.",
-                 {"asset_label": asset_label, "logical_device_id": logical_device_id})
-    c.commit(); c.close()
+    record_event(
+        c,
+        device_id,
+        "DEVICE_PROVISIONED",
+        "INFO",
+        "Device provisioned with a new unique API key.",
+        {"asset_label": asset_label, "logical_device_id": logical_device_id},
+    )
+    c.commit()
+    c.close()
 
-    return jsonify(device_id=device_id, api_key=api_key, provisioned_at_ms=now_ms,
-                   logical_device_id=logical_device_id)
+    return jsonify(
+        device_id=device_id,
+        api_key=api_key,
+        provisioned_at_ms=now_ms,
+        logical_device_id=logical_device_id,
+    )
 
 
 @app.route("/admin/devices/<device_id>/revoke-key", methods=["POST"])
@@ -998,7 +1131,8 @@ def revoke_device_key(device_id):
         return jsonify(error={"code": "DEVICE_NOT_FOUND", "message": "no such device_id"}), 404
     c.execute("UPDATE devices SET revoked=1 WHERE device_id=?", (device_id,))
     record_event(c, device_id, "KEY_REVOKED", "WARNING", "API key revoked via admin action.")
-    c.commit(); c.close()
+    c.commit()
+    c.close()
     return jsonify(success=True)
 
 
@@ -1018,10 +1152,13 @@ def rotate_device_key(device_id):
         c.close()
         return jsonify(error={"code": "DEVICE_NOT_FOUND", "message": "no such device_id"}), 404
     api_key = generate_api_key()
-    c.execute("UPDATE devices SET api_key_hash=?, revoked=0 WHERE device_id=?",
-              (hash_api_key(api_key), device_id))
+    c.execute(
+        "UPDATE devices SET api_key_hash=?, revoked=0 WHERE device_id=?",
+        (hash_api_key(api_key), device_id),
+    )
     record_event(c, device_id, "KEY_ROTATED", "INFO", "API key rotated via admin action.")
-    c.commit(); c.close()
+    c.commit()
+    c.close()
     return jsonify(device_id=device_id, api_key=api_key)
 
 
@@ -1050,7 +1187,9 @@ def list_events():
     c = db()
     rows = c.execute(
         "SELECT id, device_id, event_type, severity, message, detail_json, created_at_ms "
-        "FROM device_events ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        "FROM device_events ORDER BY id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
     c.close()
     return jsonify(events=[_event_to_dict(r) for r in rows])
 
@@ -1062,7 +1201,9 @@ def list_device_events(device_id):
     c = db()
     rows = c.execute(
         "SELECT id, device_id, event_type, severity, message, detail_json, created_at_ms "
-        "FROM device_events WHERE device_id=? ORDER BY id DESC LIMIT ?", (device_id, limit)).fetchall()
+        "FROM device_events WHERE device_id=? ORDER BY id DESC LIMIT ?",
+        (device_id, limit),
+    ).fetchall()
     c.close()
     return jsonify(events=[_event_to_dict(r) for r in rows])
 
@@ -1079,7 +1220,8 @@ def devices_dashboard():
         "SELECT device_id, asset_label, revoked, provisioned_at_ms, last_fw_version, "
         "last_kfactor_version, last_seen_ms, last_push_totalizer, derived_health_state, "
         "logical_device_id "
-        "FROM devices ORDER BY (last_seen_ms IS NULL), last_seen_ms DESC").fetchall()
+        "FROM devices ORDER BY (last_seen_ms IS NULL), last_seen_ms DESC"
+    ).fetchall()
     c.close()
     now_ms = int(time.time() * 1000)
 
@@ -1091,12 +1233,15 @@ def devices_dashboard():
 
     body = """<html><head><title>Covio Device Registry</title>
     <style>body{font-family:system-ui;margin:2rem;max-width:960px}
-    table{border-collapse:collapse;width:100%}td,th{border:1px solid #ccc;padding:.4rem .6rem;text-align:left}
+    table{border-collapse:collapse;width:100%}
+    td,th{border:1px solid #ccc;padding:.4rem .6rem;text-align:left}
     .revoked{color:#b3261e}.ok{color:#146c2e}.offline{color:#6e7781}
     form{display:inline}button{margin-right:.3rem}</style></head><body>
     <h2>Covio Device Registry</h2>
-    <p><a href="/">&larr; K-factor dashboard</a> &middot; <a href="/admin/events">Fleet event log (JSON)</a></p>
-    <table><tr><th>Logical ID</th><th>Device ID</th><th>Asset Label</th><th>Status</th><th>Health</th>
+    <p><a href="/">&larr; K-factor dashboard</a> &middot;
+       <a href="/admin/events">Fleet event log (JSON)</a></p>
+    <table><tr><th>Logical ID</th><th>Device ID</th><th>Asset Label</th>
+        <th>Status</th><th>Health</th>
     <th>Firmware</th><th>K ver</th><th>Last Seen</th><th>Provisioned</th><th>Actions</th></tr>"""
     for r in rows:
         status = "REVOKED" if r["revoked"] else "active"
@@ -1111,33 +1256,37 @@ def devices_dashboard():
         # recomputed live, at read time, via derive_health_state().
         health = derive_health_state(r["last_seen_ms"])
         health_cls = "ok" if health == "ok" else ("offline" if health == "offline" else "")
+        provisioned = (
+            fmt_ago(r["provisioned_at_ms"]) if r["provisioned_at_ms"] else "not provisioned"
+        )
         body += f"""<tr>
-          <td>{r['logical_device_id'] or '-'}</td>
-          <td>{r['device_id']}</td>
-          <td>{r['asset_label'] or '-'}</td>
+          <td>{r["logical_device_id"] or "-"}</td>
+          <td>{r["device_id"]}</td>
+          <td>{r["asset_label"] or "-"}</td>
           <td class="{status_cls}">{status}</td>
           <td class="{health_cls}">{health}</td>
-          <td>{r['last_fw_version'] or '-'}</td>
-          <td>{r['last_kfactor_version'] if r['last_kfactor_version'] is not None else '-'}</td>
-          <td>{fmt_ago(r['last_seen_ms'])}</td>
-          <td>{fmt_ago(r['provisioned_at_ms']) if r['provisioned_at_ms'] else 'not provisioned'}</td>
+          <td>{r["last_fw_version"] or "-"}</td>
+          <td>{r["last_kfactor_version"] if r["last_kfactor_version"] is not None else "-"}</td>
+          <td>{fmt_ago(r["last_seen_ms"])}</td>
+          <td>{provisioned}</td>
           <td>
-            <form method="POST" action="/admin/devices/{r['device_id']}/revoke-key"
+            <form method="POST" action="/admin/devices/{r["device_id"]}/revoke-key"
                   onsubmit="return confirm('Revoke this device\\'s API key?');">
               <button type="submit">Revoke</button>
             </form>
-            <a href="/admin/devices/{r['device_id']}/events">Events</a>
+            <a href="/admin/devices/{r["device_id"]}/events">Events</a>
           </td>
         </tr>"""
     body += "</table></body></html>"
     return Response(body, mimetype="text/html")
 
+
 # ------------------------------------------------------------ admin: K-factor
 @app.route("/admin/kfactor", methods=["POST"])
 @require_admin("admin")
 def set_kfactor():
-    k  = float(request.form["k_factor"])
-    d  = float(request.form.get("density", 0.84))
+    k = float(request.form["k_factor"])
+    d = float(request.form.get("density", 0.84))
     tr = float(request.form.get("t_ref", 15.0))
     c = db()
     # DM-Phase 4 (§6/ADR-010/N-04, flagged P0 in the original audit): every
@@ -1150,16 +1299,33 @@ def set_kfactor():
     # fleet-wide K-factor (unchanged by this phase), not per-device, so the
     # event is recorded once rather than attributed to a device it doesn't
     # actually belong to.
-    old = c.execute("SELECT k_factor, density, t_ref, version FROM calibration WHERE id=1").fetchone()
-    c.execute("UPDATE calibration SET k_factor=?, density=?, t_ref=?, version=version+1 WHERE id=1",
-              (k, d, tr))
-    record_event(c, None, "CALIBRATION_CHANGED", "INFO",
-                 "K-factor/density/T_ref changed via admin dashboard.",
-                 {"old": {"k_factor": old["k_factor"], "density": old["density"], "t_ref": old["t_ref"],
-                          "version": old["version"]},
-                  "new": {"k_factor": k, "density": d, "t_ref": tr, "version": old["version"] + 1}})
-    c.commit(); c.close()
-    return ("", 303, {"Location": "/"})   # redirect back to dashboard
+    old = c.execute(
+        "SELECT k_factor, density, t_ref, version FROM calibration WHERE id=1"
+    ).fetchone()
+    c.execute(
+        "UPDATE calibration SET k_factor=?, density=?, t_ref=?, version=version+1 WHERE id=1",
+        (k, d, tr),
+    )
+    record_event(
+        c,
+        None,
+        "CALIBRATION_CHANGED",
+        "INFO",
+        "K-factor/density/T_ref changed via admin dashboard.",
+        {
+            "old": {
+                "k_factor": old["k_factor"],
+                "density": old["density"],
+                "t_ref": old["t_ref"],
+                "version": old["version"],
+            },
+            "new": {"k_factor": k, "density": d, "t_ref": tr, "version": old["version"] + 1},
+        },
+    )
+    c.commit()
+    c.close()
+    return ("", 303, {"Location": "/"})  # redirect back to dashboard
+
 
 # ------------------------------------------------------------ admin dashboard
 @app.route("/", methods=["GET"])
@@ -1177,15 +1343,16 @@ def dashboard():
     K = cal["k_factor"]
     body = f"""<html><head><title>Covio Bench Server</title>
     <style>body{{font-family:system-ui;margin:2rem;max-width:720px}}
-    table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding:.4rem .6rem;text-align:left}}
+    table{{border-collapse:collapse;width:100%}}
+    td,th{{border:1px solid #ccc;padding:.4rem .6rem;text-align:left}}
     .card{{background:#f6f6f6;padding:1rem;border-radius:8px;margin:1rem 0}}</style></head><body>
     <h2>Covio Bench Server</h2>
     <div class="card">
-      <h3>Calibration (version {cal['version']})</h3>
+      <h3>Calibration (version {cal["version"]})</h3>
       <form method="POST" action="/admin/kfactor">
         K-factor (pulses/litre): <input name="k_factor" value="{K}" step="any"><br><br>
-        Density: <input name="density" value="{cal['density']}" step="any">
-        T_ref: <input name="t_ref" value="{cal['t_ref']}" step="any"><br><br>
+        Density: <input name="density" value="{cal["density"]}" step="any">
+        T_ref: <input name="t_ref" value="{cal["t_ref"]}" step="any"><br><br>
         <button type="submit">Update K &amp; bump version</button>
       </form>
       <p><small>Editing K recomputes all consumption below from stored raw pulses.
@@ -1197,11 +1364,14 @@ def dashboard():
     for r in rows:
         pulses = (r["hi"] or 0) - (r["lo"] or 0)
         litres = pulses / K if K else 0
-        ago = int(time.time() - (r["last"] or 0)/1000)
-        body += (f"<tr><td>{r['device_id']}</td><td>{r['n']}</td>"
-                 f"<td>{pulses}</td><td>{litres:.3f}</td><td>{ago}s ago</td></tr>")
+        ago = int(time.time() - (r["last"] or 0) / 1000)
+        body += (
+            f"<tr><td>{r['device_id']}</td><td>{r['n']}</td>"
+            f"<td>{pulses}</td><td>{litres:.3f}</td><td>{ago}s ago</td></tr>"
+        )
     body += "</table></body></html>"
     return Response(body, mimetype="text/html")
+
 
 if __name__ == "__main__":
     init_db()

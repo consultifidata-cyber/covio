@@ -14,6 +14,7 @@ Run:
 or simply:
     python test/native/test_dm_phase_0b_auth.py
 """
+
 import json
 import os
 import sys
@@ -23,10 +24,9 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "server"))
 import server  # noqa: E402
 
-
 VALID_KEY = server.BOOTSTRAP_DEFAULT_API_KEY  # "dev-key-change-me" -- every
-                                               # already-running bench device
-                                               # holds this key today.
+# already-running bench device
+# holds this key today.
 WRONG_KEY = "not-a-real-key"
 
 
@@ -49,10 +49,20 @@ class DmPhase0bAuthTests(unittest.TestCase):
     # ---- helpers -----------------------------------------------------------
     def _push(self, key=None):
         headers = {"X-Api-Key": key} if key is not None else {}
-        body = {"device_id": "test-device", "kfactor_version": 1, "records": [
-            {"schema_version": 1, "record_type": 1,
-             "boot_id": 1, "seq": 1, "ts": 100, "totalizer": 500},
-        ]}
+        body = {
+            "device_id": "test-device",
+            "kfactor_version": 1,
+            "records": [
+                {
+                    "schema_version": 1,
+                    "record_type": 1,
+                    "boot_id": 1,
+                    "seq": 1,
+                    "ts": 100,
+                    "totalizer": 500,
+                },
+            ],
+        }
         return self.client.post(
             "/api/iot/flow/push",
             data=json.dumps(body),
@@ -76,9 +86,9 @@ class DmPhase0bAuthTests(unittest.TestCase):
 
     def _revoke(self, key):
         c = server.db()
-        c.execute("UPDATE devices SET revoked=1 WHERE api_key_hash=?",
-                   (server.hash_api_key(key),))
-        c.commit(); c.close()
+        c.execute("UPDATE devices SET revoked=1 WHERE api_key_hash=?", (server.hash_api_key(key),))
+        c.commit()
+        c.close()
 
     # 1. valid key -> 200, unchanged behavior, for all three routes ----------
     def test_valid_key_unchanged_behavior(self):
@@ -130,7 +140,8 @@ class DmPhase0bAuthTests(unittest.TestCase):
         c = server.db()
         row = c.execute(
             "SELECT revoked FROM devices WHERE api_key_hash=?",
-            (server.hash_api_key(server.BOOTSTRAP_DEFAULT_API_KEY),)).fetchone()
+            (server.hash_api_key(server.BOOTSTRAP_DEFAULT_API_KEY),),
+        ).fetchone()
         c.close()
         self.assertIsNotNone(row, "bootstrap default key was not seeded")
         self.assertEqual(row["revoked"], 0)
@@ -142,8 +153,7 @@ class DmPhase0bAuthTests(unittest.TestCase):
         self._push(WRONG_KEY)
         c = server.db()
         n_records = c.execute("SELECT COUNT(*) AS n FROM records").fetchone()["n"]
-        n_quarantine = c.execute(
-            "SELECT COUNT(*) AS n FROM quarantined_records").fetchone()["n"]
+        n_quarantine = c.execute("SELECT COUNT(*) AS n FROM quarantined_records").fetchone()["n"]
         c.close()
         self.assertEqual(n_records, 0)
         self.assertEqual(n_quarantine, 0)

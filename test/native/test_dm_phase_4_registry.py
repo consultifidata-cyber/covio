@@ -14,6 +14,7 @@ Run:
 or simply:
     python test/native/test_dm_phase_4_registry.py
 """
+
 import json
 import os
 import sys
@@ -23,7 +24,6 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "server"))
 import server  # noqa: E402
-
 
 VALID_KEY = server.BOOTSTRAP_DEFAULT_API_KEY  # "dev-key-change-me"
 
@@ -46,14 +46,24 @@ class DmPhase4RegistryTests(unittest.TestCase):
         os.unlink(self._tmp.name)
 
     # ---- helpers -----------------------------------------------------------
-    def _push(self, key=None, device_id="test-device", fw=None, kfactor_version=1,
-              records=None):
+    def _push(self, key=None, device_id="test-device", fw=None, kfactor_version=1, records=None):
         headers = {"X-Api-Key": key} if key is not None else {}
-        body = {"device_id": device_id, "kfactor_version": kfactor_version,
-                "records": records if records is not None else [
-                    {"schema_version": 1, "record_type": 1,
-                     "boot_id": 1, "seq": 1, "ts": 100, "totalizer": 500},
-                ]}
+        body = {
+            "device_id": device_id,
+            "kfactor_version": kfactor_version,
+            "records": records
+            if records is not None
+            else [
+                {
+                    "schema_version": 1,
+                    "record_type": 1,
+                    "boot_id": 1,
+                    "seq": 1,
+                    "ts": 100,
+                    "totalizer": 500,
+                },
+            ],
+        }
         if fw is not None:
             body["fw"] = fw
         return self.client.post(
@@ -95,9 +105,15 @@ class DmPhase4RegistryTests(unittest.TestCase):
         return self.client.post(f"/admin/devices/{device_id}/rotate-key", auth=self._admin_auth())
 
     def _set_kfactor(self, k, density=0.84, t_ref=15.0):
-        return self.client.post("/admin/kfactor", data={
-            "k_factor": str(k), "density": str(density), "t_ref": str(t_ref),
-        }, auth=self._admin_auth())
+        return self.client.post(
+            "/admin/kfactor",
+            data={
+                "k_factor": str(k),
+                "density": str(density),
+                "t_ref": str(t_ref),
+            },
+            auth=self._admin_auth(),
+        )
 
     def _device_row(self, device_id):
         c = server.db()
@@ -131,9 +147,12 @@ class DmPhase4RegistryTests(unittest.TestCase):
         c.execute("""CREATE TABLE devices (
             device_id TEXT, api_key_hash TEXT, revoked INTEGER NOT NULL DEFAULT 0
         )""")
-        c.execute("INSERT INTO devices (device_id, api_key_hash, revoked) VALUES (?, ?, 0)",
-                   ("pre-existing-device", server.hash_api_key("some-old-key")))
-        c.commit(); c.close()
+        c.execute(
+            "INSERT INTO devices (device_id, api_key_hash, revoked) VALUES (?, ?, 0)",
+            ("pre-existing-device", server.hash_api_key("some-old-key")),
+        )
+        c.commit()
+        c.close()
 
         server.init_db()  # re-run, as every process start does
 
@@ -156,7 +175,8 @@ class DmPhase4RegistryTests(unittest.TestCase):
         c.execute("DELETE FROM schema_migrations WHERE version=?", (server.DEVICES_SCHEMA_VERSION,))
         c.execute("DROP TABLE IF EXISTS devices_new")
         c.execute("CREATE TABLE devices_new (device_id TEXT PRIMARY KEY)")  # orphaned leftover
-        c.commit(); c.close()
+        c.commit()
+        c.close()
 
         server.init_db()  # must not raise
 
@@ -168,8 +188,10 @@ class DmPhase4RegistryTests(unittest.TestCase):
         server.init_db()
         server.init_db()
         c = server.db()
-        n = c.execute("SELECT COUNT(*) AS n FROM schema_migrations WHERE version=?",
-                      (server.DEVICES_SCHEMA_VERSION,)).fetchone()["n"]
+        n = c.execute(
+            "SELECT COUNT(*) AS n FROM schema_migrations WHERE version=?",
+            (server.DEVICES_SCHEMA_VERSION,),
+        ).fetchone()["n"]
         c.close()
         self.assertEqual(n, 1)
 
@@ -205,8 +227,12 @@ class DmPhase4RegistryTests(unittest.TestCase):
         self.assertEqual(events[0]["event_type"], "DEVICE_PROVISIONED")
 
     def test_provision_requires_device_id(self):
-        resp = self.client.post("/admin/devices/provision", data=json.dumps({}),
-                                 content_type="application/json", auth=self._admin_auth())
+        resp = self.client.post(
+            "/admin/devices/provision",
+            data=json.dumps({}),
+            content_type="application/json",
+            auth=self._admin_auth(),
+        )
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(resp.get_json()["error"]["code"], "DEVICE_ID_REQUIRED")
 
@@ -264,13 +290,30 @@ class DmPhase4RegistryTests(unittest.TestCase):
     def test_twin_updates_after_successful_push(self):
         r = self._provision("device-F")
         api_key = r.get_json()["api_key"]
-        resp = self._push(api_key, device_id="device-F", fw="1.2.3", kfactor_version=4,
-                           records=[
-                               {"schema_version": 1, "record_type": 1,
-                                "boot_id": 1, "seq": 1, "ts": 100, "totalizer": 700},
-                               {"schema_version": 1, "record_type": 1,
-                                "boot_id": 1, "seq": 2, "ts": 101, "totalizer": 900},
-                           ])
+        resp = self._push(
+            api_key,
+            device_id="device-F",
+            fw="1.2.3",
+            kfactor_version=4,
+            records=[
+                {
+                    "schema_version": 1,
+                    "record_type": 1,
+                    "boot_id": 1,
+                    "seq": 1,
+                    "ts": 100,
+                    "totalizer": 700,
+                },
+                {
+                    "schema_version": 1,
+                    "record_type": 1,
+                    "boot_id": 1,
+                    "seq": 2,
+                    "ts": 101,
+                    "totalizer": 900,
+                },
+            ],
+        )
         self.assertEqual(resp.status_code, 200)
 
         row = self._device_row("device-F")
@@ -292,12 +335,28 @@ class DmPhase4RegistryTests(unittest.TestCase):
     def test_quarantined_records_do_not_poison_last_push_totalizer(self):
         r = self._provision("device-G")
         api_key = r.get_json()["api_key"]
-        resp = self._push(api_key, device_id="device-G", records=[
-            {"schema_version": 1, "record_type": 1,
-             "boot_id": 1, "seq": 1, "ts": 100, "totalizer": 300},
-            {"schema_version": 99, "record_type": 1,  # unsupported -> quarantined
-             "boot_id": 1, "seq": 2, "ts": 101, "totalizer": 999999},
-        ])
+        resp = self._push(
+            api_key,
+            device_id="device-G",
+            records=[
+                {
+                    "schema_version": 1,
+                    "record_type": 1,
+                    "boot_id": 1,
+                    "seq": 1,
+                    "ts": 100,
+                    "totalizer": 300,
+                },
+                {
+                    "schema_version": 99,
+                    "record_type": 1,  # unsupported -> quarantined
+                    "boot_id": 1,
+                    "seq": 2,
+                    "ts": 101,
+                    "totalizer": 999999,
+                },
+            ],
+        )
         self.assertEqual(resp.status_code, 200)
         row = self._device_row("device-G")
         self.assertEqual(row["last_push_totalizer"], 300)
@@ -371,13 +430,14 @@ class DmPhase4RegistryTests(unittest.TestCase):
         c = server.db()
         stale_ms = int(time.time() * 1000) - (10 * 60 * 1000)  # 10 min ago
         c.execute("UPDATE devices SET last_seen_ms=? WHERE device_id=?", (stale_ms, "device-L"))
-        c.commit(); c.close()
+        c.commit()
+        c.close()
 
         resp = self.client.get("/admin/devices", auth=self._admin_auth())
         self.assertEqual(resp.status_code, 200)
         html = resp.data.decode("utf-8")
         row_start = html.index("device-L")
-        row_fragment = html[row_start:row_start + 400]
+        row_fragment = html[row_start : row_start + 400]
         self.assertIn("offline", row_fragment)
         self.assertNotIn('class="ok">ok', row_fragment)
 

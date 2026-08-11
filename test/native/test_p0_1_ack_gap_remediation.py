@@ -27,6 +27,7 @@ Run:
 or simply:
     python test/native/test_p0_1_ack_gap_remediation.py
 """
+
 import json
 import os
 import sys
@@ -39,9 +40,14 @@ import server  # noqa: E402
 
 
 def row(seq, schema_version=1, record_type=1, totalizer=None):
-    return {"schema_version": schema_version, "record_type": record_type,
-            "boot_id": 1, "seq": seq, "ts": 100 + seq,
-            "totalizer": totalizer if totalizer is not None else 500 + seq}
+    return {
+        "schema_version": schema_version,
+        "record_type": record_type,
+        "boot_id": 1,
+        "seq": seq,
+        "ts": 100 + seq,
+        "totalizer": totalizer if totalizer is not None else 500 + seq,
+    }
 
 
 class P0_1_AckGapRemediationTests(unittest.TestCase):
@@ -87,10 +93,13 @@ class P0_1_AckGapRemediationTests(unittest.TestCase):
 
     # ---- 2. first record permanently rejected, later accepted ---------------
     def test_first_record_rejected_later_accepted_ack_advances_past_it(self):
-        resp = self._push([
-            row(1, schema_version=99),   # permanently rejected
-            row(2), row(3),
-        ])
+        resp = self._push(
+            [
+                row(1, schema_version=99),  # permanently rejected
+                row(2),
+                row(3),
+            ]
+        )
         self.assertEqual(self._accepted_seqs(), [2, 3])
         self.assertIn(1, self._quarantine_reasons())
         # THE core RISK-01 fix: ack_seq must advance to 3, not stall at 0.
@@ -101,7 +110,9 @@ class P0_1_AckGapRemediationTests(unittest.TestCase):
         resp = self._push([row(1), row(2, schema_version=99), row(3)])
         self.assertEqual(self._accepted_seqs(), [1, 3])
         self.assertEqual(resp.get_json()["ack_seq"], 3)
-        self.assertEqual(resp.get_json()["quarantined"], [{"seq": 2, "reason": "unsupported_schema_version:99"}])
+        self.assertEqual(
+            resp.get_json()["quarantined"], [{"seq": 2, "reason": "unsupported_schema_version:99"}]
+        )
 
     # ---- 4. last record permanently rejected ---------------------------------
     def test_last_record_rejected_ack_still_advances_past_it(self):
@@ -128,7 +139,9 @@ class P0_1_AckGapRemediationTests(unittest.TestCase):
         # A record can only ever end up accepted or quarantined once push()
         # actually parses it -- documented here as an explicit design
         # assertion, not just prose in a comment.
-        resp = self._push([row(1)])
+        # Pushed for its effect on receiver state; the response body is not
+        # what this test is asserting on.
+        self._push([row(1)])
         self.assertEqual(self._accepted_seqs(), [1])
         self.assertEqual(self._quarantine_reasons(), {})
 
@@ -234,12 +247,16 @@ class P0_1_AckGapRemediationTests(unittest.TestCase):
         # start does this) against the SAME on-disk sqlite file.
         server.init_db()
         self.assertIn(1, self._quarantine_reasons())
-        events = self.client.get("/admin/events", auth=("admin", server.ADMIN_PASSWORD)).get_json()["events"]
+        events = self.client.get("/admin/events", auth=("admin", server.ADMIN_PASSWORD)).get_json()[
+            "events"
+        ]
         types = [e["event_type"] for e in events]
         self.assertIn("RECORDS_QUARANTINED", types)
         quarantine_event = next(e for e in events if e["event_type"] == "RECORDS_QUARANTINED")
-        self.assertEqual(quarantine_event["detail"]["quarantined"],
-                          [{"seq": 1, "reason": "unsupported_schema_version:99"}])
+        self.assertEqual(
+            quarantine_event["detail"]["quarantined"],
+            [{"seq": 1, "reason": "unsupported_schema_version:99"}],
+        )
 
     # ---- 18. later valid records become prunable without skipping retryable data
     def test_quarantine_resolves_immediately_in_the_same_push_that_produced_it(self):

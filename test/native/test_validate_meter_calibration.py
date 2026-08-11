@@ -11,6 +11,7 @@ this same test/native/ suite's other tool tests (test_sign_manifest_tool.py).
 Run:
     python -m unittest discover -s test/native -v
 """
+
 import os
 import sys
 import unittest
