@@ -86,20 +86,50 @@ jobs:
       - name: Lint (ESLint)
         run: npm run lint
 
+      # An env var set to an EMPTY STRING is not the same as an ABSENT one,
+      # and that distinction is what broke the first release this repo ever
+      # got far enough to attempt. `CSC_LINK: ${{ secrets.CSC_LINK }}` with no
+      # such secret configured hands electron-builder an empty value, which it
+      # treats as a certificate path it must resolve, not as "unset":
+      #
+      #   ⨯ Env WIN_CSC_LINK is not correct, cannot resolve:
+      #     D:\a\covio\covio\tools\device-manager not a file
+      #
+      # So the signing variables are exported ONLY when a certificate is
+      # genuinely present. With no cert, nothing is exported and
+      # electron-builder packages unsigned, which is what actually happens
+      # today (forceCodeSigning: false in package.json). Adding the secrets
+      # later switches signing on with no further workflow change.
+      - name: Configure code signing (only if a certificate is present)
+        shell: bash
+        env:
+          CSC_LINK_SECRET: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD_SECRET: ${{ secrets.CSC_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -n "${CSC_LINK_SECRET:-}" ]; then
+            {
+              echo "CSC_LINK<<__COVIO_EOF__"
+              echo "$CSC_LINK_SECRET"
+              echo "__COVIO_EOF__"
+              echo "CSC_KEY_PASSWORD<<__COVIO_EOF__"
+              echo "${CSC_KEY_PASSWORD_SECRET:-}"
+              echo "__COVIO_EOF__"
+            } >> "$GITHUB_ENV"
+            echo "Code-signing certificate provided -- signing enabled."
+          else
+            echo "No code-signing certificate configured -- packaging UNSIGNED."
+            echo "Windows may warn on first run of the installer. This is expected."
+          fi
+
       - name: Build installer + portable package (electron-builder)
         # Builds both configured win targets (nsis, portable) per
         # package.json's build.win.target, with artifactName matching
         # Docs/RELEASE_VERSIONING.md, and generates a .sha256 file next to
         # each via the afterAllArtifactBuild hook (scripts/afterAllArtifactBuild.js).
-        # No CSC_LINK/CSC_KEY_PASSWORD secrets are configured for this
-        # repository yet -- electron-builder's own default behavior skips
-        # code signing when they're absent (forceCodeSigning: false in
-        # package.json makes this explicit rather than relying on silent
-        # default behavior). See Docs/DESKTOP_PACKAGING.md.
+        # Signing env vars, if any, come from the step above. See
+        # Docs/DESKTOP_PACKAGING.md.
         run: npm run dist
-        env:
-          CSC_LINK: ${{ secrets.CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
 
       - name: Upload installer + checksum
         uses: actions/upload-artifact@v4
