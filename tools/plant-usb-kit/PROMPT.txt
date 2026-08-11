@@ -1,0 +1,37 @@
+================================================================
+ PASTE EVERYTHING BELOW THE LINE INTO CLAUDE CODE
+ (open Claude Code in this folder first, so it can read CLAUDE.md)
+================================================================
+
+I am at the Balaji plant, standing at the Covio oil flow meter. The USB cable is
+plugged in. I am new to this device and I am not going to type any commands —
+please read CLAUDE.md in this folder, follow its safety rules exactly, and run
+everything yourself. Just tell me what you need me to do physically, one thing
+at a time.
+
+Work through this:
+
+1. Run the setup check and confirm you can see the meter on USB. If you cannot,
+   tell me what to try with the cable.
+
+2. Run the 7-minute evidence capture yourself (use a 600000 ms timeout so it is
+   not cut off). Then read everything in the evidence\ folder and tell me in
+   plain language:
+     - Did the meter respond, and what firmware version is it running?
+     - Did we capture the "[OTA] REJECTED candidate ... : <reason>" line?
+       If yes: what is the reason and what does it mean?
+       If no: tell me whether to capture again for longer, or whether it means
+       no update was being offered at all.
+     - Is anything in the log unhealthy or unexpected?
+
+3. Tell me clearly whether anything else needs doing while I am still here with
+   the cable connected — and if the answer is "nothing", say so plainly so I can
+   pack up.
+
+Do not flash anything and do not change any setting on the meter unless I tell
+you the founder has authorized it and I give you the authorization phrase.
+Read-only is the whole job today.
+
+At the end, write a short summary I can send to the founder on WhatsApp: what we
+found, what we changed (if anything), and what is still open. Say plainly if any
+step failed or was skipped.
