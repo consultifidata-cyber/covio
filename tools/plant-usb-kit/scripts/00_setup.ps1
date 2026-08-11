@@ -46,11 +46,11 @@ foreach ($name in $expected.Keys) {
 # beside each binary at build time, rather than a hash pinned in this script --
 # so a newer bench build can be dropped in without editing code.
 $benchDir = Join-Path $artifactDir "bench"
-$benchVersion = "unknown"
+$benchVersion = "not fetched yet"
 $bvFile = Join-Path $benchDir "VERSION.txt"
 if (Test-Path $bvFile) { $benchVersion = (Get-Content $bvFile -Raw).Trim() }
 Write-Host ""
-Write-Host "BENCH images (v$benchVersion - CI-built, NEVER yet run on hardware):"
+Write-Host "BENCH images ($benchVersion - CI-built, NEVER yet run on hardware):"
 $benchBins = @(Get-ChildItem -Path $benchDir -Filter "*.bin" -ErrorAction SilentlyContinue)
 if ($benchBins.Count -eq 0) {
     Write-Host "  [MISSING] no bench images present - run .\05_check_repo.ps1" -ForegroundColor Yellow
@@ -138,5 +138,15 @@ if (-not $pyOk) {
 }
 
 Write-Host ""
-Write-Host "Ready. Next step: run  .\01_capture.ps1" -ForegroundColor Cyan
+# Point at the step that is actually next. On a fresh clone that is fetching
+# firmware, not the capture -- sending a new engineer to the wrong command
+# first is how a simple job turns into a support call.
+if ($benchBins.Count -eq 0) {
+    Write-Host "Next step: run  .\05_check_repo.ps1" -ForegroundColor Cyan
+    Write-Host "           (fetches the firmware - none is stored in the repo)" -ForegroundColor Cyan
+} else {
+    Write-Host "Ready." -ForegroundColor Cyan
+    Write-Host "  bench testing : .\04_bench_flash.ps1   then BENCH-TESTING.md" -ForegroundColor Cyan
+    Write-Host "  plant visit   : .\01_capture.ps1       (read-only, always safe)" -ForegroundColor Cyan
+}
 Write-Host ""
