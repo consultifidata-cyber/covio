@@ -416,6 +416,16 @@ void loop() {
   if (now - tOta >= OTA_POLL_MS) {
     tOta = now;
     ota.poll(syncEngine.online(), syncEngine);    // DM-Phase 2: WiFi-authority consolidation -- may download + reboot into new image.
+
+    // Hand the OTA outcome to Sync so the next push carries it to the cloud.
+    // Without this the reason a meter refuses an update is visible only on its
+    // LAN endpoint and its serial console -- which means a person has to go to
+    // the plant to read it. OTA_ACCEPT is the enum's "nothing was rejected"
+    // value, so it maps to nullptr rather than being reported as a reason.
+    syncEngine.setOtaStatus(
+        otaStateStr(ota.state()),
+        ota.lastRejectReason() == OTA_ACCEPT ? nullptr
+                                             : otaVerdictStr(ota.lastRejectReason()));
                                                    // RISK-16: syncEngine also supplies the best-effort time estimate for manifest expiry checks.
   }
 

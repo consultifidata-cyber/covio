@@ -62,6 +62,16 @@ public:
   // WiFi.begin() at the same time with different credentials.
   void setWifiAuthorityPaused(bool paused) { wifiAuthorityPaused_ = paused; }
 
+  // Called by the main loop after each OTA poll so the next push can carry the
+  // device's OTA status to the cloud. Pass nullptr for `reject` when nothing
+  // has been rejected -- absent is the honest encoding for "no rejection",
+  // rather than sending the verdict string "accept" and making a reader work
+  // out that it means the opposite of a problem.
+  void setOtaStatus(const char* state, const char* reject) {
+    otaState_  = state;
+    otaReject_ = reject;
+  }
+
   // Non-blocking WiFi keepalive with exponential backoff + jitter.
   void wifiService() {
     if (wifiAuthorityPaused_) return;
@@ -113,7 +123,7 @@ public:
     int n = q_->pending(batch, PUSH_BATCH_MAX);
     if (n == 0) return false;
 
-    String body = Telemetry::toJson(*st_, batch, n);
+    String body = Telemetry::toJson(*st_, batch, n, otaState_, otaReject_);
     String url = st_->serverUrl() + PATH_PUSH;
 
     // DM-Phase 5 (ADR-005): https:// uses a pinned-CA WiFiClientSecure --
@@ -320,6 +330,13 @@ private:
                                     : (uint32_t)(2 * PUSH_PERIOD_MS);
     pushBackoffMs_ += (esp_random() % 1000);
   }
+
+  // OTA status as last reported by the main loop, forwarded in the push
+  // envelope. Held as plain const char* because both come from the compile-
+  // time string tables in ota.h / ota_version_policy.h -- there is nothing to
+  // own or free, and nothing to go stale between polls.
+  const char* otaState_  = nullptr;
+  const char* otaReject_ = nullptr;
 
   Store* st_ = nullptr;
   EventQueue* q_ = nullptr;

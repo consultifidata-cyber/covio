@@ -36,7 +36,7 @@
 // FW_VERSION is a property of the SOURCE TREE, not of a product: both
 // products are cut from the same commit at the same version. What separates
 // them for OTA purposes is DEVICE_MODEL below.
-#define FW_VERSION            "1.1.0"
+#define FW_VERSION            "1.2.0"
 
 // ---- OTA hardware identity (hw_compat) --------------------------------------
 // ota.h passes DEVICE_MODEL as the manifest's `hw_compat` field and REFUSES
@@ -65,7 +65,31 @@
 // any candidate manifest whose security_version is lower than the highest
 // value this device has ever confirmed healthy on (Store::securityVersion(),
 // a durable NVS-backed floor -- see store.h and ota_version_policy.h).
-#define FW_SECURITY_VERSION    1
+// RAISED 1 -> 2 ON 2026-08-11, AND THIS IS WHY OTA HAS NEVER WORKED.
+//
+// The commissioned Balaji meter reports accepted_security_floor = 2, while
+// this tree has always compiled FW_SECURITY_VERSION = 1. ota_version_policy.h
+// rejects any candidate whose security_version is strictly below the device's
+// floor, so every image CI has ever built was refused with
+// "downgrade_rejected" on every poll -- silently, forever.
+//
+// A floor of 2 can only have been written by an image built with
+// FW_SECURITY_VERSION = 2 (ota.h:292 advances the floor to its own compiled
+// value and never lowers it). The meter runs a HAND-BUILT 1.0.1 whose source
+// was never reconciled with this repo; this is the concrete proof that it
+// differs from the tree in a load-bearing way.
+//
+// Raising this to 2 is also correct on its own merits, independent of the
+// floor: the releases since 1.0.1 carry genuinely security-relevant fixes --
+// the task watchdog, bounded server ack_seq, and per-product OTA hw_compat
+// that stops one product's image being accepted by the other.
+//
+// Equal is accepted (the comparison is strictly less-than), so 2 is
+// sufficient. Do not raise it further "to be safe": every increment is a
+// permanent, irreversible ratchet on real hardware, and setting it above
+// what a device can ever be offered is exactly how this meter locked itself
+// out of updates in the first place.
+#define FW_SECURITY_VERSION    2
 
 // ---- First-boot default endpoint (OVERRIDDEN by NVS after provisioning) -----
 // NOTE: use https:// in the field. sync.h/ota.h dispatch on server_url's own

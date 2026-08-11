@@ -78,6 +78,19 @@
 // ---- DM-Phase 1 (local diagnostics, §13 A.4 ota_state enum) --------------
 enum OtaState { OTA_STATE_NONE, OTA_STATE_PENDING_VERIFY, OTA_STATE_CONFIRMED, OTA_STATE_FAILED };
 
+// Public stringifier for OtaState. It lives here, next to the enum, because
+// there are now two consumers -- the LAN diagnostics JSON and the cloud push
+// envelope -- and two hand-maintained copies of a switch over the same enum is
+// how they drift apart. diagnostics.h delegates to this.
+inline const char* otaStateStr(OtaState s) {
+  switch (s) {
+    case OTA_STATE_PENDING_VERIFY: return "pending_verify";
+    case OTA_STATE_CONFIRMED:      return "confirmed";
+    case OTA_STATE_FAILED:         return "failed";
+    default:                       return "none";
+  }
+}
+
 // RISK-16 remediation: manifest-authenticity rejection reasons, reported
 // alongside RISK-15's OtaVerdict via /api/v1/status so an operator can tell
 // "rejected for being a downgrade" apart from "rejected for a bad signature"

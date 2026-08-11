@@ -65,6 +65,24 @@ constexpr bool ceStrEq(const char* a, const char* b) {
   return (*a == *b) && (*a == '\0' || ceStrEq(a + 1, b + 1));
 }
 
+// ---------------------------------------------------------------------------
+// ANTI-DOWNGRADE FLOOR -- do not lower this without reading the story first.
+// ---------------------------------------------------------------------------
+// The commissioned Balaji meter carries accepted_security_floor = 2 in NVS.
+// ota_version_policy.h refuses any candidate whose security_version is
+// strictly below that floor, so an image built with FW_SECURITY_VERSION < 2
+// is rejected as "downgrade_rejected" on every single poll -- which is exactly
+// what silently blocked every OTA that device was ever offered.
+//
+// The floor is a monotonic ratchet in NVS and cannot be lowered from the
+// cloud. Dropping this constant back to 1 would therefore not just regress a
+// build flag, it would re-lock a production meter out of updates with no
+// remote way to recover it.
+static_assert(FW_SECURITY_VERSION >= 2,
+              "FW_SECURITY_VERSION must stay >= 2: the deployed Balaji meter's "
+              "anti-downgrade floor is 2, and anything lower is rejected as a "
+              "downgrade on every OTA poll, permanently.");
+
 constexpr const char* HW_COMPAT_OILFLOW  = "covio-oilflow-v1";
 constexpr const char* HW_COMPAT_MIKIWIRE = "miki-wire-v1";
 static_assert(!ceStrEq(HW_COMPAT_OILFLOW, HW_COMPAT_MIKIWIRE),
