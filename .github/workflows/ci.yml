@@ -256,32 +256,22 @@ jobs:
       - name: Build Miki Wire hardened-profile firmware (esp32dev-mikiwire)
         run: pio run -e esp32dev-mikiwire
 
-      - name: Build production firmware (release)
+      # ---- The two SHIPPING images -------------------------------------------
+      # One source tree, two products. Both are RELEASE_BUILD=1 (real pinned CA,
+      # real OTA public key, clean-tree build identity enforced) and both are
+      # published on every release, so a plant technician never has to build
+      # anything locally.
+      - name: Build production firmware — Covio oil flow (release)
         run: pio run -e release
+
+      - name: Build production firmware — Miki Wire (release-mikiwire)
+        run: pio run -e release-mikiwire
 
       - name: Prepare versioned artifacts
         id: artifact
         shell: bash
         run: |
           set -euo pipefail
-          BIN_SRC=".pio/build/release/firmware.bin"
-          ELF_SRC=".pio/build/release/firmware.elf"
-          MAP_SRC=".pio/build/release/firmware.map"
-
-          if [ ! -f "$BIN_SRC" ]; then
-            echo "::error::Expected build output not found at $BIN_SRC -- the release environment did not produce a firmware.bin where PlatformIO's own standard convention says it should."
-            exit 1
-          fi
-          # .elf is PlatformIO's/GCC's own standard linker output for any
-          # successful build -- required, same as .bin. .map is NOT
-          # guaranteed by every toolchain/framework combination without an
-          # explicit linker flag this project has not added (stated
-          # honestly in Docs/FIRMWARE_BUILD.md) -- best-effort: uploaded if
-          # produced, a warning (not a failure) if not.
-          if [ ! -f "$ELF_SRC" ]; then
-            echo "::error::Expected build output not found at $ELF_SRC -- PlatformIO/GCC did not produce a firmware.elf where standard convention says it should."
-            exit 1
-          fi
 
           # Extract FW_VERSION from config.h without assuming exact
           # whitespace between the macro name and its value (the real
@@ -301,18 +291,147 @@ jobs:
           fi
 
           mkdir -p artifacts
-          cp "$BIN_SRC" "artifacts/covio-firmware-v${VERSION}.bin"
-          cp "$ELF_SRC" "artifacts/covio-firmware-v${VERSION}.elf"
-          if [ -f "$MAP_SRC" ]; then
-            cp "$MAP_SRC" "artifacts/covio-firmware-v${VERSION}.map"
-          else
-            echo "::warning::No firmware.map produced by this build -- skipping (not every toolchain/framework combination emits one without an explicit linker flag; see Docs/FIRMWARE_BUILD.md). .bin and .elf are still uploaded."
+
+          # ---- TWO PRODUCTS, ONE RELEASE ---------------------------------------
+          # Each product gets a self-describing, unmistakable file name, because
+          # the person downloading these is standing at a machine with a cable in
+          # their hand. Two rules are encoded in the names themselves:
+          #
+          #   *-app.bin           flash at 0x10000. THE NORMAL PATH for any unit
+          #                       that is already commissioned. Preserves NVS
+          #                       (API key, WiFi, totalizer, OTA floor) and the
+          #                       SPIFFS reading queue.
+          #
+          #   *-FACTORY-ONLY-full.bin
+          #                       flash at 0x0. VIRGIN UNITS ONLY. esptool's
+          #                       merge_bin pads the gap between the partition
+          #                       table and boot_app0 with 0xFF, and the NVS
+          #                       partition lives in exactly that gap
+          #                       (0x9000-0xDFFF) -- so writing this to a
+          #                       commissioned unit ERASES its API key, WiFi,
+          #                       server URL, totalizer checkpoint and OTA
+          #                       anti-downgrade floor. A RELEASE_BUILD image
+          #                       with no API key halts at boot and stops
+          #                       metering. The name is the warning.
+          PRODUCTS="release:covio-oilflow release-mikiwire:miki-wire"
+
+          BOOTAPP0="$(find "$HOME/.platformio/packages" -name boot_app0.bin 2>/dev/null | head -1 || true)"
+          ESPTOOL="$(find "$HOME/.platformio/packages" -name 'esptool.py' 2>/dev/null | head -1 || true)"
+
+          for entry in $PRODUCTS; do
+            ENV_NAME="${entry%%:*}"
+            PRODUCT="${entry##*:}"
+            BUILD_DIR=".pio/build/${ENV_NAME}"
+            PREFIX="artifacts/${PRODUCT}-v${VERSION}"
+
+            # .bin and .elf are PlatformIO's/GCC's own standard outputs for any
+            # successful build -- their absence is a real failure, not a warning.
+            for required in firmware.bin firmware.elf bootloader.bin partitions.bin; do
+              if [ ! -f "${BUILD_DIR}/${required}" ]; then
+                echo "::error::${ENV_NAME}: expected build output ${BUILD_DIR}/${required} is missing"
+                exit 1
+              fi
+            done
+
+            cp "${BUILD_DIR}/firmware.bin"   "${PREFIX}-app.bin"
+            cp "${BUILD_DIR}/firmware.elf"   "${PREFIX}.elf"
+            cp "${BUILD_DIR}/bootloader.bin" "${PREFIX}-bootloader.bin"
+            cp "${BUILD_DIR}/partitions.bin" "${PREFIX}-partitions.bin"
+            [ -n "$BOOTAPP0" ] && cp "$BOOTAPP0" "${PREFIX}-boot_app0.bin"
+
+            # .map is NOT guaranteed by every toolchain/framework combination
+            # without an explicit linker flag this project has not added
+            # (stated honestly in Docs/FIRMWARE_BUILD.md).
+            if [ -f "${BUILD_DIR}/firmware.map" ]; then
+              cp "${BUILD_DIR}/firmware.map" "${PREFIX}.map"
+            else
+              echo "::warning::${ENV_NAME}: no firmware.map produced -- skipping (see Docs/FIRMWARE_BUILD.md). .bin and .elf are still uploaded."
+            fi
+
+            if [ -n "$ESPTOOL" ] && [ -n "$BOOTAPP0" ]; then
+              python "$ESPTOOL" --chip esp32s3 merge_bin \
+                -o "${PREFIX}-FACTORY-ONLY-full.bin" \
+                --flash_mode dio --flash_freq 80m --flash_size 16MB \
+                0x0     "${PREFIX}-bootloader.bin" \
+                0x8000  "${PREFIX}-partitions.bin" \
+                0xe000  "${PREFIX}-boot_app0.bin" \
+                0x10000 "${PREFIX}-app.bin" \
+              && echo "${PRODUCT}: merged factory image built" \
+              || echo "::warning::${PRODUCT}: merge_bin failed -- the per-offset images are still uploaded"
+            else
+              echo "::warning::${PRODUCT}: esptool.py or boot_app0.bin not found -- factory image skipped; per-offset images are still uploaded and flashable."
+            fi
+          done
+
+          # Prove the two products did NOT build to the same OTA identity. If
+          # they ever did, an image for one would be accepted by the other, and
+          # since the boards read the sensor on different GPIOs the cross-flashed
+          # unit would keep running while counting nothing. Cheap check, total
+          # protection -- and it fails the build, it does not warn.
+          OIL_BIN="artifacts/covio-oilflow-v${VERSION}-app.bin"
+          MIKI_BIN="artifacts/miki-wire-v${VERSION}-app.bin"
+          idcheck() {  # <image> <hw_compat it MUST carry> <hw_compat it must NOT carry>
+            if ! grep -aq "$2" "$1"; then
+              echo "::error::OTA identity guard: $1 does not carry hw_compat '$2'."
+              exit 1
+            fi
+            if grep -aq "$3" "$1"; then
+              echo "::error::OTA identity guard: $1 carries the OTHER product's hw_compat '$3' -- this image could be cross-flashed onto the wrong machine."
+              exit 1
+            fi
+          }
+          idcheck "$OIL_BIN"  "covio-oilflow-v1" "miki-wire-v1"
+          idcheck "$MIKI_BIN" "miki-wire-v1"     "covio-oilflow-v1"
+          if cmp -s "$OIL_BIN" "$MIKI_BIN"; then
+            echo "::error::OTA identity guard: the two product images are byte-identical -- the profile flag did not take effect."
+            exit 1
           fi
+          echo "OTA identity guard: oil-flow and Miki images are distinct and each carries only its own hw_compat."
+
+          # A one-page answer to "which of these do I flash?", shipped AS a
+          # release asset so it is impossible to miss and impossible to have a
+          # stale local copy of. The person reading it is at a machine, not at
+          # a desk with the repo open.
+          cat > "artifacts/WHICH-FILE-DO-I-FLASH.txt" <<EOF
+          COVIO FIRMWARE v${VERSION} - WHICH FILE DO I FLASH?
+          ==================================================
+
+          TWO PRODUCTS ARE BUILT FROM THIS ONE RELEASE. Pick your machine:
+
+            Balaji Foods, oil flow meter  ->  covio-oilflow-v${VERSION}-app.bin
+            Miki Wire MW-001, Ranchi      ->  miki-wire-v${VERSION}-app.bin
+
+          NORMAL CASE - a meter already installed and working:
+
+            python -m esptool --chip esp32s3 --port COMx --baud 460800 \\
+              write_flash 0x10000 <the -app.bin for your machine>
+
+            Writing at 0x10000 keeps the device's API key, WiFi, server URL,
+            totalizer and queued readings. Do NOT run erase_flash.
+
+          THE FILE YOU MUST NOT USE ON A WORKING MACHINE:
+
+            *-FACTORY-ONLY-full.bin  is for a BRAND NEW, never-configured unit.
+            It is written at 0x0 and it blanks the NVS region (0x9000-0xDFFF),
+            which erases the API key, WiFi, server URL, totalizer checkpoint
+            and OTA anti-downgrade floor. A release build with no API key
+            refuses to boot - the machine STOPS METERING until somebody
+            re-provisions it by hand at the device.
+
+          DO NOT MIX THE TWO PRODUCTS. They read the sensor on different pins
+          (oil flow GPIO1, Miki Wire GPIO4/DI1). The firmware refuses a
+          cross-product OTA on its own - hw_compat covio-oilflow-v1 vs
+          miki-wire-v1 - but nothing stops a USB cable from doing it, and a
+          cross-flashed unit keeps running while counting nothing.
+
+          Every file has a matching .sha256 - check it before you flash.
+          EOF
 
           # SHA256 checksum for every real artifact produced, matching
           # RE-6's own established afterAllArtifactBuild.js convention
           # exactly (same "<hash>  <filename>" format).
           for f in artifacts/*; do
+            case "$f" in *.sha256) continue ;; esac
             sha256sum "$f" | sed "s|artifacts/||" > "$f.sha256"
           done
 

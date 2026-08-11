@@ -163,10 +163,19 @@ jobs:
             fi
           }
 
-          check "release-assets/firmware/covio-firmware-v${VERSION}.bin"
-          check "release-assets/firmware/covio-firmware-v${VERSION}.bin.sha256"
-          check "release-assets/firmware/covio-firmware-v${VERSION}.elf"
-          check "release-assets/firmware/covio-firmware-v${VERSION}.elf.sha256"
+          # Two products are cut from this one source tree, and BOTH must be
+          # present before anything is published -- a release carrying only one
+          # of them is how a plant ends up flashing last month's image to the
+          # other machine. Names are checked exactly as a technician will read
+          # them off the release page.
+          for product in covio-oilflow miki-wire; do
+            check "release-assets/firmware/${product}-v${VERSION}-app.bin"
+            check "release-assets/firmware/${product}-v${VERSION}-app.bin.sha256"
+            check "release-assets/firmware/${product}-v${VERSION}.elf"
+            check "release-assets/firmware/${product}-v${VERSION}.elf.sha256"
+            check "release-assets/firmware/${product}-v${VERSION}-FACTORY-ONLY-full.bin"
+            check "release-assets/firmware/${product}-v${VERSION}-FACTORY-ONLY-full.bin.sha256"
+          done
           check "release-assets/desktop/covio-device-manager-setup-v${VERSION}.exe"
           check "release-assets/desktop/covio-device-manager-setup-v${VERSION}.exe.sha256"
           check "release-assets/desktop/covio-device-manager-v${VERSION}-portable.exe"
@@ -180,11 +189,13 @@ jobs:
 
           # firmware.map is best-effort (ci.yml's own firmware job,
           # Docs/FIRMWARE_BUILD.md) -- included if present, never required.
-          if [ -f "release-assets/firmware/covio-firmware-v${VERSION}.map" ]; then
-            echo "firmware.map present -- will be included in the release."
-          else
-            echo "::warning::firmware.map was not produced for this release (best-effort artifact -- see Docs/FIRMWARE_BUILD.md). Publishing without it."
-          fi
+          for product in covio-oilflow miki-wire; do
+            if [ -f "release-assets/firmware/${product}-v${VERSION}.map" ]; then
+              echo "${product}: firmware.map present -- will be included in the release."
+            else
+              echo "::warning::${product}: firmware.map was not produced for this release (best-effort artifact -- see Docs/FIRMWARE_BUILD.md). Publishing without it."
+            fi
+          done
 
       - name: Create GitHub Release
         env:
@@ -199,7 +210,7 @@ jobs:
           fi
           gh release create "$TAG" \
             --repo "${{ github.repository }}" \
-            --title "Covio Device Manager $TAG" \
+            --title "Covio $TAG — oil flow + Miki Wire firmware, Device Manager" \
             --generate-notes \
             "${PRERELEASE_ARGS[@]}" \
             release-assets/firmware/* \
