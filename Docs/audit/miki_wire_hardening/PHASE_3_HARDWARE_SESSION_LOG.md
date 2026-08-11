@@ -124,6 +124,28 @@ further, out of scope without authorization.
 
 ---
 
+## Session 4 addendum — accidental commit disclosure + live flash hazard
+
+1. **Disclosure:** commit `c303a8b` unintentionally swept in
+   `Docs/PLANT_PICKUP.md` via `git add -A` — a file that appeared in the
+   working tree at 2026-08-11 12:18 IST, not authored by this effort. It
+   is preserved as found (nothing altered). Reviewed after the fact, it
+   partially conflicts with this branch's actual state: it describes
+   per-product OTA identity (`hw_compat: miki-wire-v1`), per-product
+   release assets, a CI `PRODUCTS` list, `--publish/--unpublish` manifest
+   tooling, and FACTORY-ONLY full images — none of which exist on this
+   branch (verified by grep); and its "in AP mode this firmware stops
+   metering entirely" is true of the deployed images but corrected by this
+   branch's candidate (F3 fix). Its provenance/intent needs owner
+   clarification. Session policy changed: explicit per-file `git add`
+   only, no `-A`, in this shared tree.
+2. **⚠ LIVE HAZARD while the Balaji unit occupies COM6:**
+   `platformio.ini:77` hard-codes `upload_port = COM6` (a fact
+   PLANT_PICKUP.md itself warns about). Any habitual `pio run -t upload`
+   in this repo right now would flash THE BALAJI PRODUCTION DEVICE.
+   No upload of any kind will be run while STOP 1 stands; recommend
+   physically disconnecting the Balaji unit before any bench work.
+
 ## Required physical hardware (blocking everything below A-row procedures)
 
 1. **Waveshare ESP32-S3-POE-ETH-8DI-8DO** bench unit (NOT the MW-001
