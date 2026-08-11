@@ -41,9 +41,9 @@ Write-Host "=== CHECKING THE REPO FOR NEW FIRMWARE ===" -ForegroundColor Cyan
 Write-Host "  repo: $Repo"
 
 $localVersionFile = Join-Path $benchDir "VERSION.txt"
-$localVersion = "(none)"
+$localVersion = "none yet"
 if (Test-Path $localVersionFile) { $localVersion = (Get-Content $localVersionFile -Raw).Trim() }
-Write-Host "  this kit currently holds: v$localVersion"
+Write-Host "  this kit currently holds: $localVersion"
 Write-Host ""
 
 # ---------------------------------------------------------------- ask GitHub
@@ -70,7 +70,7 @@ if ($latest -eq $localVersion) {
     exit 0
 }
 
-Write-Host "A different version is published (v$latest) than this kit holds (v$localVersion)." -ForegroundColor Yellow
+Write-Host "Published: v$latest.  This kit holds: $localVersion." -ForegroundColor Yellow
 Write-Host ""
 
 # ------------------------------------------------------- work out what to get
@@ -143,7 +143,7 @@ Remove-Item $staging -Recurse -Force
 Set-Content -Path $localVersionFile -Value $latest -Encoding ascii
 
 Write-Host ""
-Write-Host "BENCH FOLDER UPDATED: v$localVersion -> v$latest" -ForegroundColor Green
+Write-Host "BENCH FOLDER UPDATED: $localVersion -> v$latest" -ForegroundColor Green
 Get-ChildItem -Path $benchDir -Filter "*.bin" | ForEach-Object { Write-Host "  $($_.Name)" }
 Write-Host ""
 Write-Host "The PLANT folder was not touched - it stays pinned by hand." -ForegroundColor Cyan
