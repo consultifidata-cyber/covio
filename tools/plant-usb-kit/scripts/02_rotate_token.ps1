@@ -64,7 +64,9 @@ function Get-Fingerprint([string]$consoleText) {
 }
 
 $port = New-Object System.IO.Ports.SerialPort($ComPort, 115200, 'None', 8, 'One')
-$port.DtrEnable   = $false
+# DTR asserted: TinyUSB CDC on the ESP32-S3 only transmits while the host
+# asserts it. See the longer note in 01_capture.ps1.
+$port.DtrEnable   = $true
 $port.RtsEnable   = $false
 $port.ReadTimeout = 500
 $port.NewLine     = "`n"
