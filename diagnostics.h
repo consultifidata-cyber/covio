@@ -19,6 +19,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include "esp_system.h"   // esp_reset_reason(), esp_get_minimum_free_heap_size()
+#include "reset_reason.h" // the single reset-cause table, shared with telemetry.h
 #include "config.h"
 #include "store.h"
 #include "totalizer.h"
@@ -289,20 +290,17 @@ private:
   // identifiable from a single /api/v1/metrics read (also see
   // "reset_reason_raw", the same raw integer as its own dedicated field)
   // -- no further firmware round-trip needed to even see the number.
+  // The table itself now lives in reset_reason.h, because the cloud push
+  // envelope (telemetry.h) needs the identical answer and two switches over
+  // one enum is how the LAN endpoint and the cloud would eventually come to
+  // disagree about why the same meter rebooted. Output here is byte-for-byte
+  // what it always was, including the "unknown(<n>)" form -- captured plant
+  // evidence and the audit trail quote this string exactly.
   static String resetReasonStr_() {
     esp_reset_reason_t r = esp_reset_reason();
-    switch (r) {
-      case ESP_RST_POWERON:   return "power_on";
-      case ESP_RST_EXT:       return "external_pin";
-      case ESP_RST_SW:        return "software";
-      case ESP_RST_PANIC:     return "panic";
-      case ESP_RST_INT_WDT:
-      case ESP_RST_TASK_WDT:
-      case ESP_RST_WDT:       return "watchdog";
-      case ESP_RST_BROWNOUT:  return "brownout";
-      case ESP_RST_DEEPSLEEP: return "deepsleep";
-      default:                 return "unknown(" + String((int)r) + ")";
-    }
+    const char* name = resetReasonName(r);
+    if (name) return String(name);
+    return "unknown(" + String((int)r) + ")";
   }
 
   // Shared by buildStatusJson()/buildHealthJson() so the health_state

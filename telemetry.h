@@ -23,6 +23,7 @@
 #include <WiFi.h>
 #include "queue.h"
 #include "store.h"
+#include "reset_reason.h"
 
 class Telemetry {
 public:
@@ -47,6 +48,9 @@ public:
   // {
   //   "device_id":"esp32-....","fw":"1.0.0","model":"covio-oilflow-v1",
   //   "kfactor_version": <uint>,
+  //   "boot":{"boot_id":N,"reset_reason":"power_on","reset_reason_raw":1,
+  //           "restart_count":N,"watchdog_reset_count":N,
+  //           "brownout_reset_count":N},
   //   "records":[
   //     {"schema_version":N,"record_type":N,"boot_id":N,"seq":N,"ts":N,
   //      "totalizer":N,"quality":N,"rssi":-N}, ...
@@ -85,6 +89,60 @@ public:
     s += ",\"fw\":\"" FW_VERSION "\"";
     s += ",\"model\":\"" DEVICE_MODEL "\"";
     s += ",\"kfactor_version\":" + String(st.cfgVer());
+
+    // ---- why this device is running, and how it has been behaving --------
+    //
+    // WHY THIS EXISTS. A gap in the readings has two completely different
+    // meanings and the cloud could not tell them apart. If the meter lost
+    // power, the pump on the same supply stopped too, so no oil moved and
+    // the day's total is EXACT. If the meter reset itself while the plant
+    // kept running, oil flowed past an unpowered sensor and the total is a
+    // floor. Both looked identical from the server, so every gap had to be
+    // treated as the bad case -- which meant days that were in fact complete
+    // were reported to the owner as unreliable. The device has always known
+    // the answer; it just had no way to say it, because esp_reset_reason()
+    // was published only on the LAN-only /api/v1/metrics endpoint that
+    // nobody outside the plant network can reach.
+    //
+    // BOOT_ID IS LOAD-BEARING, NOT DECORATION. A push batch can carry
+    // records from an EARLIER boot -- that is exactly what happens when the
+    // queue flushes a backlog after a restart -- so the reset cause must
+    // name the boot it belongs to. Without it a receiver would attribute
+    // this boot's reason to whichever boot the records happened to come
+    // from, and cheerfully clear a gap the meter was never off for.
+    //
+    // The raw numeric cause always travels alongside the mapped name, so an
+    // enumerator this firmware does not know about arrives identifiable
+    // rather than flattened into a bare "unknown". The three counters are
+    // NVS-backed lifetime totals (store.h) and survive reboots: a climbing
+    // brownout count is a supply problem worth an electrician, and a
+    // climbing watchdog count is a firmware problem worth us.
+    //
+    // ADR-001 IS UNAFFECTED, exactly as with the `ota` block below:
+    // schema_version and record_type stay PER-RECORD and unchanged, this is
+    // envelope-level only, and receivers that do not know the key ignore it.
+    {
+      esp_reset_reason_t rr = esp_reset_reason();
+      const char* rrName = resetReasonName(rr);
+      s += ",\"boot\":{\"boot_id\":" + String(st.bootId());
+      s += ",\"reset_reason\":\"";
+      if (rrName) {
+        s += rrName;
+      } else {
+        // Never a bare "unknown": the number keeps an enumerator this build
+        // has not been taught about identifiable from the payload alone.
+        s += "unknown(";
+        s += String((int)rr);
+        s += ")";
+      }
+      s += "\"";
+      s += ",\"reset_reason_raw\":" + String((int)rr);
+      s += ",\"restart_count\":" + String(st.restartCount());
+      s += ",\"watchdog_reset_count\":" + String(st.watchdogResetCount());
+      s += ",\"brownout_reset_count\":" + String(st.brownoutResetCount());
+      s += "}";
+    }
+
     if (otaState || otaReject) {
       s += ",\"ota\":{";
       bool first = true;

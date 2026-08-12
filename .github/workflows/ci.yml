@@ -520,6 +520,21 @@ jobs:
         working-directory: test/native_cpp
         run: ./test_sensor_ct
 
+      # Reset-cause table. The ERP clears a measurement gap -- declares that
+      # no oil moved -- on the strength of these strings and the power-loss
+      # predicate, so a renamed cause silently unclears history and a cause
+      # wrongly added to the power-loss set fabricates a zero. Neither shows
+      # up as an error anywhere downstream, which is why it is pinned here.
+      - name: Compile reset-cause mapping tests
+        working-directory: test/native_cpp
+        run: |
+          g++ -std=c++14 -Wall -DNATIVE_TEST -I../.. \
+            test_reset_reason.cpp -o test_reset_reason
+
+      - name: Run reset-cause mapping tests
+        working-directory: test/native_cpp
+        run: ./test_reset_reason
+
       # Multi-board enhancement: pin-table regression guard, compiled TWICE
       # -- once flag-less (must resolve to the deployed production baseline:
       # BOARD_RELAY1CH pins + NPN) and once with the 8DI-8DO/CT overrides.
