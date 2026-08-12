@@ -18,6 +18,55 @@ phase definitions and acceptance criteria referenced below.
 
 ## [Unreleased]
 
+### v1.3.0 — the meter says WHY it rebooted
+
+- Added: `reset_reason.h` — the single mapping from `esp_reset_reason()` to a
+  cause name, plus `resetReasonIsPowerLoss()`. Previously a private static
+  inside `diagnostics.h`; promoted because `telemetry.h` now needs the same
+  answer, and two switches over one enum is how the LAN endpoint and the
+  cloud would eventually disagree about why the same meter rebooted.
+  `diagnostics.h` delegates to it and its `/api/v1/metrics` output — including
+  the `unknown(<n>)` form — is byte-for-byte unchanged.
+- Added: a `boot` object in the push envelope (`telemetry.h::toJson`) carrying
+  `boot_id`, `reset_reason`, `reset_reason_raw`, and the three NVS-backed
+  lifetime counters `restart_count` / `watchdog_reset_count` /
+  `brownout_reset_count`.
+
+  **Why.** A gap in the readings had two opposite meanings that the cloud
+  could not tell apart. If the meter lost power, the pump on the same supply
+  stopped too, so no oil moved and the day's total is exact. If the meter
+  reset itself while the plant kept running, oil flowed past an unpowered
+  sensor and the total is a floor. Indistinguishable from the server, so every
+  gap had to be treated as the bad case — and days that were in fact complete
+  were reported to the owner as unreliable. The device always knew; it had no
+  way to say so, because the answer was published only on the LAN-only
+  `/api/v1/metrics` endpoint nobody outside the plant network can reach.
+
+  `boot_id` is load-bearing, not decoration: a push batch can carry records
+  from an EARLIER boot (that is exactly what a backlog flush after a restart
+  looks like), so the reset cause must name the boot it belongs to. Without
+  it a receiver would pin this boot's reason onto whichever boot the records
+  came from, and clear a gap the meter was never off for.
+
+  ADR-001 is unaffected — `schema_version`/`record_type` remain per-record and
+  unchanged; this is envelope-level only, and receivers ignore keys they do
+  not know (the bench receiver in `server/server.py` reads the envelope with
+  `.get()` and needed no change).
+- Added: `test/native_cpp/test_reset_reason.cpp`, wired into the
+  `firmware-native-fault-injection` CI job. The ERP clears a measurement gap
+  on the strength of these strings and that predicate, so a renamed cause
+  silently unclears history and a cause wrongly added to the power-loss set
+  fabricates a zero — neither surfaces as an error downstream. Raw 0
+  (`ESP_RST_UNKNOWN`, what an esptool-triggered reset reads on the deployed
+  Balaji hardware, captured 2026-08-11) is pinned as NOT power loss.
+- Changed: `FW_VERSION` 1.2.1 → 1.3.0. `FW_SECURITY_VERSION` stays 2 — this
+  release changes no security posture, and that floor is a monotonic NVS
+  ratchet that must never be lowered.
+
+  ⚠ Not built, not signed, not published. This tree has no hardware here and
+  no compiler; the C++ has been reviewed but never compiled. Cutting a release
+  and arming an OTA manifest remain deliberate founder-run steps.
+
 ### RE-10 — Final Production Readiness Audit & Release Sign-off
 - Added: `Docs/RE10_FINAL_PRODUCTION_READINESS_REPORT.md` — the final
   Release Engineering deliverable: independent Release Manager review
