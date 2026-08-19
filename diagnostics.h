@@ -18,6 +18,8 @@
 #pragma once
 #include <Arduino.h>
 #include <WiFi.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"       // uxTaskGetStackHighWaterMark (P1 hardening)
 #include "esp_system.h"   // esp_reset_reason(), esp_get_minimum_free_heap_size()
 #include "reset_reason.h" // the single reset-cause table, shared with telemetry.h
 #include "config.h"
@@ -195,6 +197,14 @@ public:
     s.reserve(512 + rssiHistoryCount * 8);
     s  = "{\"free_heap_bytes\":" + String(ESP.getFreeHeap());
     s += ",\"heap_low_water_mark_bytes\":" + String(esp_get_minimum_free_heap_size());
+    // P1 hardening: stack high-water mark for the sole app task (this
+    // firmware runs one cooperative loop, see config.h's own watchdog
+    // comment -- uxTaskGetStackHighWaterMark(NULL) reports the CURRENT
+    // task's, i.e. the loop task's, minimum-ever remaining stack in words;
+    // *sizeof(StackType_t) converts to bytes. Heap was already observed
+    // here; stack was not.
+    s += ",\"stack_high_water_mark_bytes\":" +
+         String(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t));
     // Root-cause audit (Part 8, this remediation pass): the raw numeric
     // esp_reset_reason() value is now ALWAYS included alongside the mapped
     // string, and resetReasonStr_() itself embeds the raw number in its
