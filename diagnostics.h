@@ -292,7 +292,6 @@ public:
     }
   }
 
-private:
   // Part 8 (this remediation pass): the prior ESP_RST_EXT-only guess did
   // NOT resolve the "unknown" observation on real hardware (35_OTA_TIME_
   // SOURCE_REMEDIATION..., §11) -- kept here because it is still a real,
@@ -303,6 +302,11 @@ private:
   // identifiable from a single /api/v1/metrics read (also see
   // "reset_reason_raw", the same raw integer as its own dedicated field)
   // -- no further firmware round-trip needed to even see the number.
+  //
+  // P1 hardening: promoted from private to public, same visibility as
+  // otaStateStr_() just above -- covio_firmware.ino now reuses this
+  // directly to build the one-per-boot telemetry "diag" fragment
+  // (see toJson()'s call site) instead of duplicating this switch.
   static String resetReasonStr_() {
     esp_reset_reason_t r = esp_reset_reason();
     switch (r) {
@@ -319,6 +323,7 @@ private:
     }
   }
 
+private:
   // Shared by buildStatusJson()/buildHealthJson() so the health_state
   // precedence rule (§13 A.4) and the alarm set (§11.4, DM-Phase-1-producible
   // subset only) are computed exactly once, not duplicated (MASTER_GOVERNANCE

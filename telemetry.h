@@ -51,14 +51,24 @@ public:
   //     {"schema_version":N,"record_type":N,"boot_id":N,"seq":N,"ts":N,
   //      "totalizer":N,"quality":N,"rssi":-N}, ...
   //   ]
+  //   ,"diag": {...}   -- OPTIONAL, see diagJson param below
   // }
   // ADR-001: schema_version/record_type are carried per-record (not just once
   // per batch) so the receiver can validate/dispatch each record independently
   // — this is what makes a batch mixing the current and previous schema
   // version (normal during an OTA rollout window) well-formed and acceptable.
-  static String toJson(Store& st, const QRow* rows, int n) {
+  //
+  // P1 hardening: `diagJson`, when non-empty, is spliced in verbatim as the
+  // top-level "diag" object's VALUE (caller supplies "{...}", already
+  // JSON-object-shaped -- this function does not itself know or care what's
+  // inside it, matching the wire contract's own additive-field discipline:
+  // an old backend simply ignores an unrecognized "diag" key, and this key
+  // is never required, so old firmware talking to a new backend is
+  // unaffected either. Caller (covio_firmware.ino) builds this once per
+  // boot, not on every push, to avoid payload bloat -- see its own call site.
+  static String toJson(Store& st, const QRow* rows, int n, const String& diagJson = String()) {
     String s;
-    s.reserve(128 + n * 128);
+    s.reserve(128 + n * 128 + diagJson.length());
     s  = "{\"device_id\":\"" + st.deviceId() + "\"";
     s += ",\"fw\":\"" FW_VERSION "\"";
     s += ",\"model\":\"" DEVICE_MODEL "\"";
@@ -77,7 +87,11 @@ public:
       s += ",\"rssi\":-"    + String(r.rssi_abs);
       s += "}";
     }
-    s += "]}";
+    s += "]";
+    if (diagJson.length() > 0) {
+      s += ",\"diag\":" + diagJson;
+    }
+    s += "}";
     return s;
   }
 };

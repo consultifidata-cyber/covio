@@ -99,7 +99,16 @@ public:
 
   // ---- Push queued records; prune on cumulative ack_seq ----
   // Returns true if at least one record was acked this call.
-  bool pushOnce() {
+  //
+  // P1 hardening: `diagJson` (optional, pre-built "{...}" fragment, see
+  // Telemetry::toJson()'s own comment) is forwarded into the push body only
+  // when a request actually gets built and sent this call -- if the queue
+  // is empty (n==0) or backoff/offline short-circuits first, nothing is
+  // sent and `diagAttempted` (if supplied) stays false, so the caller
+  // (covio_firmware.ino, "once per boot" gating) knows to keep offering it
+  // on a later call rather than silently losing it to an empty-queue tick.
+  bool pushOnce(const String& diagJson = String(), bool* diagAttempted = nullptr) {
+    if (diagAttempted) *diagAttempted = false;
     if (!online()) return false;
     // Miki Wire hardening (Phase-0 finding F7): exponential backoff after
     // failed pushes. Previously a dead/erroring server was retried every
@@ -113,7 +122,8 @@ public:
     int n = q_->pending(batch, PUSH_BATCH_MAX);
     if (n == 0) return false;
 
-    String body = Telemetry::toJson(*st_, batch, n);
+    String body = Telemetry::toJson(*st_, batch, n, diagJson);
+    if (diagAttempted) *diagAttempted = true;
     String url = st_->serverUrl() + PATH_PUSH;
 
     // DM-Phase 5 (ADR-005): https:// uses a pinned-CA WiFiClientSecure --

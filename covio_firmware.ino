@@ -76,6 +76,23 @@ uint32_t seq = 0;              // GLOBALLY monotonic telemetry sequence
 uint32_t tTelemetry = 0, tPush = 0, tConfig = 0, tOta = 0;
 bool     healthySignalled = false;
 bool     crashStreakCleared = false;   // Balaji V1 freeze remediation
+bool     diagSentThisBoot = false;     // P1 hardening: see loop()'s push block
+
+// P1 hardening: builds the one-per-boot telemetry "diag" fragment (see
+// Telemetry::toJson()/Sync::pushOnce()'s own comments for the wire-contract
+// and once-per-boot reasoning). Reuses Diagnostics::resetReasonStr_()/
+// otaStateStr_() (both promoted to public for exactly this reuse, see
+// diagnostics.h) rather than duplicating either mapping.
+String buildDiagJson_() {
+  String s = "{\"reset_reason\":\"" + Diagnostics::resetReasonStr_() + "\"";
+  s += ",\"wdt_cnt\":" + String(store.watchdogResetCount());
+  s += ",\"bod_cnt\":" + String(store.brownoutResetCount());
+  s += ",\"crash_streak\":" + String(store.crashResetStreak());
+  s += ",\"ota_state\":\"" + String(Diagnostics::otaStateStr_(ota.state())) + "\"";
+  s += ",\"ota_version\":\"" FW_VERSION "\"";
+  s += "}";
+  return s;
+}
 
 // Miki Wire hardening (F2/F3): background service invoked from the OTA
 // download loop (ota.setServiceCallback below) -- the one legitimate
@@ -428,7 +445,14 @@ void loop() {
   // ---- flush queue to the configured endpoint ----
   if (now - tPush >= PUSH_PERIOD_MS) {
     tPush = now;
-    bool acked = syncEngine.pushOnce();
+    // P1 hardening: offer the diag fragment only until it's actually been
+    // included in a sent request (diagAttempted) -- an empty-queue tick
+    // (n==0 inside pushOnce()) must not silently burn the "once per boot"
+    // opportunity. buildDiagJson_() itself is cheap (a handful of NVS/RAM
+    // reads), so recomputing it on every tick until consumed is fine.
+    bool diagAttempted = false;
+    bool acked = syncEngine.pushOnce(diagSentThisBoot ? String() : buildDiagJson_(), &diagAttempted);
+    if (diagAttempted) diagSentThisBoot = true;
     // Mark firmware healthy after the device has proven it can reach the server.
     if (acked && !healthySignalled) {
       ota.confirmHealthyBoot();
