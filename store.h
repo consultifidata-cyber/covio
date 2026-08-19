@@ -112,6 +112,32 @@ public:
   // eFuse-based mechanism would not permit -- documented, not hidden).
   uint32_t securityVersion()              { return p_sec_.getUInt("sec_ver", 0); }
   void     setSecurityVersion(uint32_t v) { p_sec_.putUInt("sec_ver", v); }
+
+  // ---- P1 hardening: app-level unhealthy-boot rollback safety net --------
+  // Bootloader-level PENDING_VERIFY does not reliably arm on this hardware/
+  // toolchain (see ota.h::confirmHealthyBoot()'s own extensive comment and
+  // 36_OTA_CONFIRMATION_ROOT_CAUSE_AUDIT_AND_REMEDIATION.md). This tracks,
+  // independently of the bootloader, whether the CURRENTLY RUNNING image
+  // (identified by its own FW_VERSION/FW_SECURITY_VERSION, not by any
+  // bootloader-reported partition state) has ever reached application-level
+  // health confirmation before, and how many consecutive boots have failed
+  // to reach it. Lives in the SAME namespace as the security floor above
+  // (survives factoryReset()) deliberately: this is OTA-image safety state,
+  // not ordinary reprovisioning config -- a factory reset (WiFi/server/key)
+  // must not silently reset the crash-loop protection for a still-bad image.
+  String   lastConfirmedFwVersion()       { return p_sec_.getString("last_ok_ver", ""); }
+  uint32_t lastConfirmedSecurityVersion() { return p_sec_.getUInt("last_ok_secver", 0); }
+  uint32_t unhealthyBootStreak()          { return p_sec_.getUInt("unhealthy_streak", 0); }
+  void     incrementUnhealthyBootStreak() { p_sec_.putUInt("unhealthy_streak", unhealthyBootStreak() + 1); }
+  // Called once THIS running image has been proven healthy (see
+  // ota.h::confirmHealthyBoot()) -- records it as the new "last known good"
+  // image identity and clears the streak, the same idempotent-write shape
+  // as clearCrashResetStreak() below for the unrelated ordinary-crash counter.
+  void recordHealthyBoot(const String& fwVersion, uint32_t securityVersion) {
+    p_sec_.putString("last_ok_ver", fwVersion);
+    p_sec_.putUInt("last_ok_secver", securityVersion);
+    if (unhealthyBootStreak() != 0) p_sec_.putUInt("unhealthy_streak", 0);
+  }
   void     setCalib(float k, float d, float tr) {
     p_.putFloat("kfactor", k); p_.putFloat("density", d); p_.putFloat("tref", tr);
   }
