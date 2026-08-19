@@ -412,9 +412,13 @@ public:
     String keyId = extractStr_(body, "key_id");
     String sigB64 = extractStr_(body, "signature");
 
-    if (imageSize < 0 || imageSha256.length() != 64 || channel.length() == 0 ||
-        issuedAt < 0 || expiresAt < 0 || manifestId.length() == 0 ||
-        keyId.length() == 0 || sigB64.length() == 0) {
+    // P1 hardening: this presence check moved to manifestHasRequiredFields()
+    // in ota_manifest_auth.h (host-testable, see that file's comment) --
+    // hw_compat is now included in the required set, where it was
+    // previously optional-by-presence (see that function's own comment).
+    if (!manifestHasRequiredFields(imageSize, imageSha256.length(), channel.length(),
+                                    issuedAt, expiresAt, manifestId.length(),
+                                    keyId.length(), sigB64.length(), hwCompat.length())) {
       Serial.println("[OTA] REJECTED: manifest missing one or more required signed fields");
       lastAuthReject_ = OTA_AUTH_MISSING_FIELDS;
       return;

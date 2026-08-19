@@ -81,3 +81,21 @@ inline const char* manifestTimeVerdictStr(ManifestTimeVerdict v) {
     default:                          return "unknown";
   }
 }
+
+// Required-signed-fields presence check (P1 hardening), extracted here for
+// the same reason as buildCanonicalManifestString/checkManifestTimeValidity
+// above -- ota.h::poll() previously inlined this check mixed with live
+// HTTPClient/String code, making it untestable without a network-coupled
+// harness. Takes already-parsed lengths/values rather than Arduino String
+// objects, keeping this file Arduino-free. hw_compat is included here
+// (P1): it's part of the signed canonical string above, so it can't be
+// forged post-signing, but was previously optional-by-presence -- a
+// manifest simply omitting it silently skipped the hardware-match check in
+// ota_version_policy.h rather than being rejected outright.
+inline bool manifestHasRequiredFields(long imageSize, size_t imageSha256Len, size_t channelLen,
+                                       long issuedAt, long expiresAt, size_t manifestIdLen,
+                                       size_t keyIdLen, size_t sigB64Len, size_t hwCompatLen) {
+  return imageSize >= 0 && imageSha256Len == 64 && channelLen > 0 &&
+         issuedAt >= 0 && expiresAt >= 0 && manifestIdLen > 0 &&
+         keyIdLen > 0 && sigB64Len > 0 && hwCompatLen > 0;
+}
