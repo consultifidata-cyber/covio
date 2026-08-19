@@ -28,6 +28,7 @@
 #if WATCHDOG_ENABLE
 #include "esp_task_wdt.h"  // Miki Wire hardening (F2): task watchdog -- see config.h
 #endif
+#include "boot_health.h"   // P1 hardening: app-level unhealthy-boot rollback safety net
 #include "store.h"
 #include "totalizer.h"
 #include "queue.h"
@@ -108,6 +109,39 @@ void setup() {
 
   // 1) config/identity first (also increments boot_id and restart_cnt)
   store.begin();
+
+  // P1 hardening: app-level unhealthy-boot rollback safety net. Placed as
+  // early as possible in setup() -- right after the one call it depends on
+  // (store.begin()) -- so a crash anywhere below this point (filesystem
+  // mount, WiFi init, or anything else) is captured by the streak. A boot
+  // is "on trial" if THIS image's version pair has never reached
+  // Ota::confirmHealthyBoot() before, independent of what the bootloader's
+  // own (unreliable on this hardware, see config.h's UNHEALTHY_BOOT_STREAK_LIMIT
+  // comment) PENDING_VERIFY state says. An already-confirmed image's
+  // ordinary, unrelated crash never touches this: its version pair already
+  // matches "last confirmed", so it's never on trial.
+  {
+    bool onTrial = isBootOnTrial(store.lastConfirmedFwVersion().c_str(), store.lastConfirmedSecurityVersion(),
+                                  FW_VERSION, (uint32_t)FW_SECURITY_VERSION);
+    if (onTrial) {
+      store.incrementUnhealthyBootStreak();
+      uint32_t streak = store.unhealthyBootStreak();
+      Serial.printf("[BOOT] running unconfirmed image %s (sec=%d) - unhealthy boot streak=%u/%u\n",
+                    FW_VERSION, FW_SECURITY_VERSION, streak, (unsigned)UNHEALTHY_BOOT_STREAK_LIMIT);
+      if (streak >= UNHEALTHY_BOOT_STREAK_LIMIT) {
+        Serial.println("[BOOT] FATAL: unhealthy boot streak limit reached -- "
+                        "rolling back to the previous image (app-level safety "
+                        "net, independent of bootloader PENDING_VERIFY)");
+        esp_ota_mark_app_invalid_rollback_and_reboot();
+        // Only reaches here if there was no valid alternate partition to
+        // roll back to (e.g. this is a fresh USB-flashed baseline, not an
+        // OTA-installed image) -- fall through and keep booting rather than
+        // halt with no working image at all.
+        Serial.println("[BOOT] rollback unavailable (no valid alternate partition) -- continuing boot");
+      }
+    }
+  }
+
   // reset_ack (MW-001 commissioning reset) needs EventQueue/Totalizer;
   // safe to bind here even though their own begin() runs later below --
   // provision.begin() only stores the pointers, never dereferences them

@@ -329,6 +329,20 @@
 // HEALTHY_UPTIME_CLEARS_CRASH_STREAK_MS below), before REBOOT_LOOP fires.
 #define CRASH_RESET_STREAK_ALARM    3
 
+// P1 hardening: consecutive boots of an UNCONFIRMED firmware image (i.e.
+// this exact FW_VERSION/FW_SECURITY_VERSION pair has never reached
+// Ota::confirmHealthyBoot()) before the app-level rollback safety net fires
+// esp_ota_mark_app_invalid_rollback_and_reboot(). Exists because this
+// project's own hardware testing found the BOOTLOADER's own PENDING_VERIFY
+// trial does not reliably arm on this board/toolchain (see
+// Docs/audit/coviu_oil_meter_p0_remediation_phase2/
+// 36_OTA_CONFIRMATION_ROOT_CAUSE_AUDIT_AND_REMEDIATION.md) -- this is
+// independent of that mechanism, not a tuning of it. Deliberately the same
+// value as CRASH_RESET_STREAK_ALARM above for consistency, not because the
+// two are coupled (a confirmed image's ordinary crash-streak resets never
+// touch this counter -- see covio_firmware.ino's setup()).
+#define UNHEALTHY_BOOT_STREAK_LIMIT 3
+
 // How long a boot must run without incident before it clears the crash-
 // reset streak above -- i.e. how long counts as proof "this boot is not
 // part of a crash loop." This device has no RTC (RISK-11, unchanged), so

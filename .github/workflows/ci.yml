@@ -440,6 +440,13 @@ jobs:
             test_ack_validation.cpp -o test_ack_validation
           ./test_ack_validation
 
+      - name: Compile+run boot-health tests (P1 hardening: app-level rollback safety net)
+        working-directory: test/native_cpp
+        run: |
+          g++ -std=c++14 -Wall -I../.. \
+            test_boot_health.cpp -o test_boot_health
+          ./test_boot_health
+
       - name: Compile+run pulse-plausibility tests (Miki profile, F5)
         working-directory: test/native_cpp
         run: |
