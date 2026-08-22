@@ -503,7 +503,8 @@ jobs:
       - name: Compile v1.3.1 HTTPS/watchdog budget tests
         working-directory: test/native_cpp
         run: |
-          g++ -std=c++14 -Wall -I../.. \n            test_https_budget.cpp -o test_https_budget
+          g++ -std=c++14 -Wall -I../.. \
+            test_https_budget.cpp -o test_https_budget
 
       - name: Run v1.3.1 HTTPS/watchdog budget tests
         working-directory: test/native_cpp
