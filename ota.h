@@ -335,13 +335,15 @@ public:
     bool began;
     if (covioIsHttpsUrl(url)) {
       secureClient.setCACert(COVIO_PINNED_CA_CERT);
+      secureClient.setHandshakeTimeout(HTTPS_HANDSHAKE_TIMEOUT_S);   // v1.3.1: see config.h
       began = http.begin(secureClient, url);
     } else {
       began = http.begin(url);
     }
     if (!began) return;
     http.addHeader("X-Api-Key", st_->apiKey());
-    http.setTimeout(6000);
+    http.setConnectTimeout(HTTPS_CONNECT_TIMEOUT_MS);   // v1.3.1: explicit, budgeted
+    http.setTimeout(HTTPS_IO_TIMEOUT_MS);
     int code = http.GET();
     if (code != 200) { http.end(); return; }
 
@@ -574,12 +576,18 @@ private:
     bool began;
     if (covioIsHttpsUrl(binUrl)) {
       secureClient.setCACert(COVIO_PINNED_CA_CERT);
+      secureClient.setHandshakeTimeout(HTTPS_HANDSHAKE_TIMEOUT_S);   // v1.3.1: see config.h
       began = http.begin(secureClient, binUrl);
     } else {
       began = http.begin(binUrl);   // bench/dev http:// fallback -- see config.h
     }
     if (!began) { Serial.println("[OTA] download begin FAILED"); failed_ = true; return; }
-    http.setTimeout(15000);
+    // v1.3.1: the pre-stream part of the download (connect, handshake,
+    // headers) must fit the same watchdog budget as every other call; the
+    // streaming loop below keeps its own 15 s stall detector and feeds the
+    // watchdog through serviceCb_ while bytes flow.
+    http.setConnectTimeout(HTTPS_CONNECT_TIMEOUT_MS);
+    http.setTimeout(HTTPS_IO_TIMEOUT_MS);
 
     int code = http.GET();
     if (code != 200) {

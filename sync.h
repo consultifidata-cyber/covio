@@ -134,6 +134,7 @@ public:
     bool began;
     if (covioIsHttpsUrl(url)) {
       secureClient.setCACert(COVIO_PINNED_CA_CERT);
+      secureClient.setHandshakeTimeout(HTTPS_HANDSHAKE_TIMEOUT_S);   // v1.3.1: see config.h
       began = http.begin(secureClient, url);
     } else {
       began = http.begin(url);
@@ -141,7 +142,8 @@ public:
     if (!began) { Serial.println("[SYNC] begin failed"); return false; }
     http.addHeader("Content-Type", "application/json");
     http.addHeader("X-Api-Key", st_->apiKey());
-    http.setTimeout(8000);
+    http.setConnectTimeout(HTTPS_CONNECT_TIMEOUT_MS);   // v1.3.1: explicit, budgeted
+    http.setTimeout(HTTPS_IO_TIMEOUT_MS);
 
     uint32_t rttStart = millis();           // DM-Phase 1: §13 A.3 network_rtt_ms
     int code = http.POST(body);
@@ -246,13 +248,15 @@ public:
     bool began;
     if (covioIsHttpsUrl(url)) {
       secureClient.setCACert(COVIO_PINNED_CA_CERT);
+      secureClient.setHandshakeTimeout(HTTPS_HANDSHAKE_TIMEOUT_S);   // v1.3.1: see config.h
       began = http.begin(secureClient, url);
     } else {
       began = http.begin(url);
     }
     if (!began) return;
     http.addHeader("X-Api-Key", st_->apiKey());
-    http.setTimeout(6000);
+    http.setConnectTimeout(HTTPS_CONNECT_TIMEOUT_MS);   // v1.3.1: explicit, budgeted
+    http.setTimeout(HTTPS_IO_TIMEOUT_MS);
     int code = http.GET();
     if (code == 200) {
       // DM-Phase 1: a 200 here is itself a successful sync event (§13 A.3's

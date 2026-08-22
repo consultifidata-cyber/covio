@@ -18,6 +18,37 @@ phase definitions and acceptance criteria referenced below.
 
 ## [Unreleased]
 
+### v1.3.1 — every cloud call now finishes inside one watchdog window
+
+- Fixed: a task-watchdog crash loop on a lossy network. Live evidence from
+  the Balaji meter, 2026-08-22: 15 `watchdog` resets in one day, boot
+  lifetimes collapsing 5 h → 13 min → 6 min → 22 s → 13 s until the meter
+  went dark; nginx on the ERP logged `408` (headers received, body never
+  arrived) at the exact minute of two of the reboots. The watchdog was
+  killing the device mid-request.
+
+  **Root cause.** Nothing bounded the TLS *handshake*. arduino-esp32
+  2.0.x `WiFiClientSecure` defaults `handshake_timeout` to 120 s and
+  `HTTPClient::setTimeout()` does not touch it, so on a lossy-but-associated
+  link (a flaky Wi-Fi backhaul hop that keeps the ESP32 associated while
+  packets die upstream) one handshake could outlive the 60 s watchdog.
+  Every reset re-pushed the backlog over the same bad link and stalled
+  again. The pulse-counting path had no defect at all.
+
+  **Change.** `setHandshakeTimeout(HTTPS_HANDSHAKE_TIMEOUT_S = 10)` and an
+  explicit `setConnectTimeout` on all four `WiFiClientSecure` sites (push,
+  config poll, OTA manifest, OTA image); idle I/O bound unified to
+  `HTTPS_IO_TIMEOUT_MS = 8000`; `loop()` runs **at most one** HTTPS
+  transaction per watchdog feed; `WATCHDOG_TIMEOUT_S` 60 → 90 so it sits
+  above the *derived* worst case of one bounded transaction (80 s, see
+  `HTTPS_WORST_CASE_TXN_MS` in `config.h`); a `static_assert` in
+  `config.h` pins watchdog > worst-case so neither can be edited apart.
+  `FW_SECURITY_VERSION` stays 2 (equal is accepted by the anti-downgrade
+  floor); no schema, contract, or pin change.
+- Added: `test/native_cpp/test_https_budget.cpp` — host-compiles
+  `config.h` and asserts the watchdog/transaction budget arithmetic, so the
+  invariant is checked by CI and not only by the on-target compile.
+
 ### v1.3.0 — the meter says WHY it rebooted
 
 - Added: `reset_reason.h` — the single mapping from `esp_reset_reason()` to a
