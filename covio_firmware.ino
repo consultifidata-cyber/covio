@@ -391,9 +391,21 @@ void loop() {
     crashStreakCleared = true;
   }
 
+  // ---- v1.3.1: at most ONE HTTPS transaction per loop iteration ----
+  // The watchdog is fed once per iteration (top of loop()). Push, config
+  // poll and OTA poll are each bounded to HTTPS_WORST_CASE_TXN_MS now, but
+  // their timers all start at boot and so fall due in the SAME iteration
+  // every 60 s / 300 s -- three back-to-back worst cases would still blow
+  // the window. Whichever is due first runs; the others run next iteration
+  // (a few ms later -- their timers stay due). Pushes every PUSH_PERIOD_MS
+  // are unaffected in the normal case because a healthy push completes in
+  // well under a second.
+  bool netSlotUsed = false;
+
   // ---- flush queue to the configured endpoint ----
   if (now - tPush >= PUSH_PERIOD_MS) {
     tPush = now;
+    netSlotUsed = true;
     bool acked = syncEngine.pushOnce();
     // Mark firmware healthy after the device has proven it can reach the server.
     if (acked && !healthySignalled) {
@@ -403,8 +415,9 @@ void loop() {
   }
 
   // ---- poll K-factor / calibration config ----
-  if (now - tConfig >= CONFIG_POLL_MS) {
+  if (!netSlotUsed && now - tConfig >= CONFIG_POLL_MS) {
     tConfig = now;
+    netSlotUsed = true;
     syncEngine.pollConfig();
     if (syncEngine.online() && !healthySignalled) {
       ota.confirmHealthyBoot();
@@ -413,7 +426,7 @@ void loop() {
   }
 
   // ---- check for firmware updates ----
-  if (now - tOta >= OTA_POLL_MS) {
+  if (!netSlotUsed && now - tOta >= OTA_POLL_MS) {
     tOta = now;
     ota.poll(syncEngine.online(), syncEngine);    // DM-Phase 2: WiFi-authority consolidation -- may download + reboot into new image.
 
