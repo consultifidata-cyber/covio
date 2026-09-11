@@ -477,6 +477,18 @@ jobs:
             test_timestamp_parse.cpp -o test_timestamp_parse
           ./test_timestamp_parse
 
+      # sync.h's extractLong_() (ack_seq / K-factor "version") used to
+      # accumulate into a 32-bit `long` with no overflow check -- the same
+      # defect class server_time_ms was already fixed for above. This
+      # suite proves the historical defect empirically before proving the
+      # fix (checked_field_parse.h::parseUint32Checked()).
+      - name: Compile+run checked-field-parse tests (ack_seq/version overflow fix)
+        working-directory: test/native_cpp
+        run: |
+          g++ -std=c++14 -Wall -I../.. \
+            test_checked_field_parse.cpp -o test_checked_field_parse
+          ./test_checked_field_parse
+
   # ---------------------------------------------------------------------
   # Desktop app -- Windows (the app's actual shipped target) and Ubuntu
   # (the underlying Node logic is cross-platform; wifiScan.js's own
