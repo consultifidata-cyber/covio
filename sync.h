@@ -33,6 +33,7 @@
 #include "certs.h"
 #include "timestamp_parse.h"   // overflow-safe int64 parsing (server_time_ms remediation)
 #include "ack_validation.h"    // Miki Wire hardening (F8): ack_seq bounding
+#include "checked_field_parse.h"   // overflow-safe uint32 parsing (ack_seq / K-factor version)
 
 class Sync {
 public:
@@ -281,6 +282,19 @@ public:
 private:
   // Minimal JSON scalar extractors. Good enough for the flat, trusted
   // server contract; not a general parser.
+  //
+  // Locates "key": <digits> and parses it via parseUint32Checked()
+  // (checked_field_parse.h) -- this used to accumulate directly into a
+  // 32-bit `long` with no overflow check, the exact defect class
+  // server_time_ms was already fixed for below (extractInt64_). ack_seq
+  // wrong risks incorrect queue pruning; the K-factor "version" this also
+  // feeds is worse -- pollConfig() only re-applies a server-sent K-factor
+  // when the parsed version differs from the stored one, so a wrapped
+  // version number could make the device silently accept or silently
+  // ignore a real calibration change. Returns -1 (this method's existing
+  // "absent/malformed" contract, unchanged for every caller) on a missing
+  // field, non-digit content, an empty value, OR a value that would not
+  // fit in uint32_t -- fail-closed, never wraps.
   static long extractLong_(const String& s, const char* key) {
     String pat = "\"" + String(key) + "\"";
     int i = s.indexOf(pat);
@@ -289,9 +303,11 @@ private:
     if (i < 0) return -1;
     i++;
     while (i < (int)s.length() && (s[i] == ' ' || s[i] == '"')) i++;
-    long v = 0; bool any = false;
-    while (i < (int)s.length() && (isdigit(s[i]))) { v = v*10 + (s[i]-'0'); i++; any = true; }
-    return any ? v : -1;
+    int start = i;
+    while (i < (int)s.length() && isdigit(s[i])) i++;
+    uint32_t v;
+    if (!parseUint32Checked(s.c_str(), start, i, &v)) return -1;
+    return (long)v;
   }
   // Remediation for the OTA time-source overflow defect: same field-
   // location logic as extractLong_() above (find "key", skip to the
