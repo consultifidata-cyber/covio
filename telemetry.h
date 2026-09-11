@@ -23,6 +23,7 @@
 #include <WiFi.h>
 #include "queue.h"
 #include "store.h"
+#include "reset_reason.h"
 
 class Telemetry {
 public:
@@ -47,32 +48,112 @@ public:
   // {
   //   "device_id":"esp32-....","fw":"1.0.0","model":"covio-oilflow-v1",
   //   "kfactor_version": <uint>,
+  //   "boot":{"boot_id":N,"reset_reason":"power_on","reset_reason_raw":1,
+  //           "restart_count":N,"watchdog_reset_count":N,
+  //           "brownout_reset_count":N},
   //   "records":[
   //     {"schema_version":N,"record_type":N,"boot_id":N,"seq":N,"ts":N,
   //      "totalizer":N,"quality":N,"rssi":-N}, ...
   //   ]
-  //   ,"diag": {...}   -- OPTIONAL, see diagJson param below
   // }
   // ADR-001: schema_version/record_type are carried per-record (not just once
   // per batch) so the receiver can validate/dispatch each record independently
   // — this is what makes a batch mixing the current and previous schema
   // version (normal during an OTA rollout window) well-formed and acceptable.
+  // `otaState` / `otaReject` are the device's own OTA status, forwarded to the
+  // cloud in the ENVELOPE -- alongside fw/model/kfactor_version, which are
+  // likewise facts about the sender rather than about any record.
   //
-  // P1 hardening: `diagJson`, when non-empty, is spliced in verbatim as the
-  // top-level "diag" object's VALUE (caller supplies "{...}", already
-  // JSON-object-shaped -- this function does not itself know or care what's
-  // inside it, matching the wire contract's own additive-field discipline:
-  // an old backend simply ignores an unrecognized "diag" key, and this key
-  // is never required, so old firmware talking to a new backend is
-  // unaffected either. Caller (covio_firmware.ino) builds this once per
-  // boot, not on every push, to avoid payload bloat -- see its own call site.
-  static String toJson(Store& st, const QRow* rows, int n, const String& diagJson = String()) {
+  // WHY THIS EXISTS. The reject reason used to live only on the LAN-only
+  // /api/v1/health endpoint and the serial console, so the only way to learn
+  // why a meter had refused an update was to send a person to the plant and
+  // put them on its network. That cost real trips, and on one of them a live
+  // production meter was nearly reflashed by mistake. A meter that can explain
+  // itself to the cloud never needs that visit again.
+  //
+  // ADR-001 IS NOT AFFECTED. schema_version and record_type are carried
+  // PER-RECORD and are unchanged; this adds an envelope-level field only, so
+  // the record contract every receiver validates against is byte-for-byte what
+  // it was. Receivers read the envelope with .get()-style lookups and ignore
+  // what they do not know, so an older receiver simply does not see it.
+  //
+  // Both default to nullptr, and a nullptr is omitted rather than sent as the
+  // string "null" -- absent means "this build/caller had nothing to say",
+  // which is different from a JSON null meaning "asked, and there is none".
+  static String toJson(Store& st, const QRow* rows, int n,
+                       const char* otaState = nullptr,
+                       const char* otaReject = nullptr) {
     String s;
-    s.reserve(128 + n * 128 + diagJson.length());
+    s.reserve(160 + n * 128);
     s  = "{\"device_id\":\"" + st.deviceId() + "\"";
     s += ",\"fw\":\"" FW_VERSION "\"";
     s += ",\"model\":\"" DEVICE_MODEL "\"";
     s += ",\"kfactor_version\":" + String(st.cfgVer());
+
+    // ---- why this device is running, and how it has been behaving --------
+    //
+    // WHY THIS EXISTS. A gap in the readings has two completely different
+    // meanings and the cloud could not tell them apart. If the meter lost
+    // power, the pump on the same supply stopped too, so no oil moved and
+    // the day's total is EXACT. If the meter reset itself while the plant
+    // kept running, oil flowed past an unpowered sensor and the total is a
+    // floor. Both looked identical from the server, so every gap had to be
+    // treated as the bad case -- which meant days that were in fact complete
+    // were reported to the owner as unreliable. The device has always known
+    // the answer; it just had no way to say it, because esp_reset_reason()
+    // was published only on the LAN-only /api/v1/metrics endpoint that
+    // nobody outside the plant network can reach.
+    //
+    // BOOT_ID IS LOAD-BEARING, NOT DECORATION. A push batch can carry
+    // records from an EARLIER boot -- that is exactly what happens when the
+    // queue flushes a backlog after a restart -- so the reset cause must
+    // name the boot it belongs to. Without it a receiver would attribute
+    // this boot's reason to whichever boot the records happened to come
+    // from, and cheerfully clear a gap the meter was never off for.
+    //
+    // The raw numeric cause always travels alongside the mapped name, so an
+    // enumerator this firmware does not know about arrives identifiable
+    // rather than flattened into a bare "unknown". The three counters are
+    // NVS-backed lifetime totals (store.h) and survive reboots: a climbing
+    // brownout count is a supply problem worth an electrician, and a
+    // climbing watchdog count is a firmware problem worth us.
+    //
+    // ADR-001 IS UNAFFECTED, exactly as with the `ota` block below:
+    // schema_version and record_type stay PER-RECORD and unchanged, this is
+    // envelope-level only, and receivers that do not know the key ignore it.
+    {
+      esp_reset_reason_t rr = esp_reset_reason();
+      const char* rrName = resetReasonName(rr);
+      s += ",\"boot\":{\"boot_id\":" + String(st.bootId());
+      s += ",\"reset_reason\":\"";
+      if (rrName) {
+        s += rrName;
+      } else {
+        // Never a bare "unknown": the number keeps an enumerator this build
+        // has not been taught about identifiable from the payload alone.
+        s += "unknown(";
+        s += String((int)rr);
+        s += ")";
+      }
+      s += "\"";
+      s += ",\"reset_reason_raw\":" + String((int)rr);
+      s += ",\"restart_count\":" + String(st.restartCount());
+      s += ",\"watchdog_reset_count\":" + String(st.watchdogResetCount());
+      s += ",\"brownout_reset_count\":" + String(st.brownoutResetCount());
+      s += "}";
+    }
+
+    if (otaState || otaReject) {
+      s += ",\"ota\":{";
+      bool first = true;
+      if (otaState)  { s += "\"state\":\"" + String(otaState) + "\""; first = false; }
+      if (otaReject) {
+        if (!first) s += ",";
+        s += "\"last_reject_reason\":\"" + String(otaReject) + "\"";
+      }
+      s += ",\"security_version\":" + String(st.securityVersion());
+      s += "}";
+    }
     s += ",\"records\":[";
     for (int i = 0; i < n; i++) {
       if (i) s += ",";
@@ -87,11 +168,7 @@ public:
       s += ",\"rssi\":-"    + String(r.rssi_abs);
       s += "}";
     }
-    s += "]";
-    if (diagJson.length() > 0) {
-      s += ",\"diag\":" + diagJson;
-    }
-    s += "}";
+    s += "]}";
     return s;
   }
 };

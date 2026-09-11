@@ -62,6 +62,16 @@ public:
   // WiFi.begin() at the same time with different credentials.
   void setWifiAuthorityPaused(bool paused) { wifiAuthorityPaused_ = paused; }
 
+  // Called by the main loop after each OTA poll so the next push can carry the
+  // device's OTA status to the cloud. Pass nullptr for `reject` when nothing
+  // has been rejected -- absent is the honest encoding for "no rejection",
+  // rather than sending the verdict string "accept" and making a reader work
+  // out that it means the opposite of a problem.
+  void setOtaStatus(const char* state, const char* reject) {
+    otaState_  = state;
+    otaReject_ = reject;
+  }
+
   // Non-blocking WiFi keepalive with exponential backoff + jitter.
   void wifiService() {
     if (wifiAuthorityPaused_) return;
@@ -99,16 +109,7 @@ public:
 
   // ---- Push queued records; prune on cumulative ack_seq ----
   // Returns true if at least one record was acked this call.
-  //
-  // P1 hardening: `diagJson` (optional, pre-built "{...}" fragment, see
-  // Telemetry::toJson()'s own comment) is forwarded into the push body only
-  // when a request actually gets built and sent this call -- if the queue
-  // is empty (n==0) or backoff/offline short-circuits first, nothing is
-  // sent and `diagAttempted` (if supplied) stays false, so the caller
-  // (covio_firmware.ino, "once per boot" gating) knows to keep offering it
-  // on a later call rather than silently losing it to an empty-queue tick.
-  bool pushOnce(const String& diagJson = String(), bool* diagAttempted = nullptr) {
-    if (diagAttempted) *diagAttempted = false;
+  bool pushOnce() {
     if (!online()) return false;
     // Miki Wire hardening (Phase-0 finding F7): exponential backoff after
     // failed pushes. Previously a dead/erroring server was retried every
@@ -122,8 +123,7 @@ public:
     int n = q_->pending(batch, PUSH_BATCH_MAX);
     if (n == 0) return false;
 
-    String body = Telemetry::toJson(*st_, batch, n, diagJson);
-    if (diagAttempted) *diagAttempted = true;
+    String body = Telemetry::toJson(*st_, batch, n, otaState_, otaReject_);
     String url = st_->serverUrl() + PATH_PUSH;
 
     // DM-Phase 5 (ADR-005): https:// uses a pinned-CA WiFiClientSecure --
@@ -134,6 +134,7 @@ public:
     bool began;
     if (covioIsHttpsUrl(url)) {
       secureClient.setCACert(COVIO_PINNED_CA_CERT);
+      secureClient.setHandshakeTimeout(HTTPS_HANDSHAKE_TIMEOUT_S);   // v1.3.1: see config.h
       began = http.begin(secureClient, url);
     } else {
       began = http.begin(url);
@@ -141,7 +142,8 @@ public:
     if (!began) { Serial.println("[SYNC] begin failed"); return false; }
     http.addHeader("Content-Type", "application/json");
     http.addHeader("X-Api-Key", st_->apiKey());
-    http.setTimeout(8000);
+    http.setConnectTimeout(HTTPS_CONNECT_TIMEOUT_MS);   // v1.3.1: explicit, budgeted
+    http.setTimeout(HTTPS_IO_TIMEOUT_MS);
 
     uint32_t rttStart = millis();           // DM-Phase 1: §13 A.3 network_rtt_ms
     int code = http.POST(body);
@@ -246,13 +248,15 @@ public:
     bool began;
     if (covioIsHttpsUrl(url)) {
       secureClient.setCACert(COVIO_PINNED_CA_CERT);
+      secureClient.setHandshakeTimeout(HTTPS_HANDSHAKE_TIMEOUT_S);   // v1.3.1: see config.h
       began = http.begin(secureClient, url);
     } else {
       began = http.begin(url);
     }
     if (!began) return;
     http.addHeader("X-Api-Key", st_->apiKey());
-    http.setTimeout(6000);
+    http.setConnectTimeout(HTTPS_CONNECT_TIMEOUT_MS);   // v1.3.1: explicit, budgeted
+    http.setTimeout(HTTPS_IO_TIMEOUT_MS);
     int code = http.GET();
     if (code == 200) {
       // DM-Phase 1: a 200 here is itself a successful sync event (§13 A.3's
@@ -330,6 +334,13 @@ private:
                                     : (uint32_t)(2 * PUSH_PERIOD_MS);
     pushBackoffMs_ += (esp_random() % 1000);
   }
+
+  // OTA status as last reported by the main loop, forwarded in the push
+  // envelope. Held as plain const char* because both come from the compile-
+  // time string tables in ota.h / ota_version_policy.h -- there is nothing to
+  // own or free, and nothing to go stale between polls.
+  const char* otaState_  = nullptr;
+  const char* otaReject_ = nullptr;
 
   Store* st_ = nullptr;
   EventQueue* q_ = nullptr;

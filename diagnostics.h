@@ -21,6 +21,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"       // uxTaskGetStackHighWaterMark (P1 hardening)
 #include "esp_system.h"   // esp_reset_reason(), esp_get_minimum_free_heap_size()
+#include "reset_reason.h" // the single reset-cause table, shared with telemetry.h
 #include "config.h"
 #include "store.h"
 #include "totalizer.h"
@@ -283,15 +284,12 @@ public:
     return "configured";
   }
 
-  static const char* otaStateStr_(OtaState s) {
-    switch (s) {
-      case OTA_STATE_PENDING_VERIFY: return "pending_verify";
-      case OTA_STATE_CONFIRMED:      return "confirmed";
-      case OTA_STATE_FAILED:         return "failed";
-      default:                       return "none";
-    }
-  }
+  // Delegates to ota.h's otaStateStr(), which the cloud push envelope also
+  // uses. Kept as a thin wrapper so this header's existing call sites do not
+  // all have to change, but there is now exactly ONE switch over OtaState.
+  static const char* otaStateStr_(OtaState s) { return otaStateStr(s); }
 
+private:
   // Part 8 (this remediation pass): the prior ESP_RST_EXT-only guess did
   // NOT resolve the "unknown" observation on real hardware (35_OTA_TIME_
   // SOURCE_REMEDIATION..., §11) -- kept here because it is still a real,
@@ -302,28 +300,19 @@ public:
   // identifiable from a single /api/v1/metrics read (also see
   // "reset_reason_raw", the same raw integer as its own dedicated field)
   // -- no further firmware round-trip needed to even see the number.
-  //
-  // P1 hardening: promoted from private to public, same visibility as
-  // otaStateStr_() just above -- covio_firmware.ino now reuses this
-  // directly to build the one-per-boot telemetry "diag" fragment
-  // (see toJson()'s call site) instead of duplicating this switch.
+  // The table itself now lives in reset_reason.h, because the cloud push
+  // envelope (telemetry.h) needs the identical answer and two switches over
+  // one enum is how the LAN endpoint and the cloud would eventually come to
+  // disagree about why the same meter rebooted. Output here is byte-for-byte
+  // what it always was, including the "unknown(<n>)" form -- captured plant
+  // evidence and the audit trail quote this string exactly.
   static String resetReasonStr_() {
     esp_reset_reason_t r = esp_reset_reason();
-    switch (r) {
-      case ESP_RST_POWERON:   return "power_on";
-      case ESP_RST_EXT:       return "external_pin";
-      case ESP_RST_SW:        return "software";
-      case ESP_RST_PANIC:     return "panic";
-      case ESP_RST_INT_WDT:
-      case ESP_RST_TASK_WDT:
-      case ESP_RST_WDT:       return "watchdog";
-      case ESP_RST_BROWNOUT:  return "brownout";
-      case ESP_RST_DEEPSLEEP: return "deepsleep";
-      default:                 return "unknown(" + String((int)r) + ")";
-    }
+    const char* name = resetReasonName(r);
+    if (name) return String(name);
+    return "unknown(" + String((int)r) + ")";
   }
 
-private:
   // Shared by buildStatusJson()/buildHealthJson() so the health_state
   // precedence rule (§13 A.4) and the alarm set (§11.4, DM-Phase-1-producible
   // subset only) are computed exactly once, not duplicated (MASTER_GOVERNANCE

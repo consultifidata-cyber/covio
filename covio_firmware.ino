@@ -76,23 +76,6 @@ uint32_t seq = 0;              // GLOBALLY monotonic telemetry sequence
 uint32_t tTelemetry = 0, tPush = 0, tConfig = 0, tOta = 0;
 bool     healthySignalled = false;
 bool     crashStreakCleared = false;   // Balaji V1 freeze remediation
-bool     diagSentThisBoot = false;     // P1 hardening: see loop()'s push block
-
-// P1 hardening: builds the one-per-boot telemetry "diag" fragment (see
-// Telemetry::toJson()/Sync::pushOnce()'s own comments for the wire-contract
-// and once-per-boot reasoning). Reuses Diagnostics::resetReasonStr_()/
-// otaStateStr_() (both promoted to public for exactly this reuse, see
-// diagnostics.h) rather than duplicating either mapping.
-String buildDiagJson_() {
-  String s = "{\"reset_reason\":\"" + Diagnostics::resetReasonStr_() + "\"";
-  s += ",\"wdt_cnt\":" + String(store.watchdogResetCount());
-  s += ",\"bod_cnt\":" + String(store.brownoutResetCount());
-  s += ",\"crash_streak\":" + String(store.crashResetStreak());
-  s += ",\"ota_state\":\"" + String(Diagnostics::otaStateStr_(ota.state())) + "\"";
-  s += ",\"ota_version\":\"" FW_VERSION "\"";
-  s += "}";
-  return s;
-}
 
 // Miki Wire hardening (F2/F3): background service invoked from the OTA
 // download loop (ota.setServiceCallback below) -- the one legitimate
@@ -163,7 +146,18 @@ void setup() {
   // safe to bind here even though their own begin() runs later below --
   // provision.begin() only stores the pointers, never dereferences them
   // until an operator actually types reset_ack over serial.
-  provision.begin(&store, &eventQueue, &totalizer);
+  // Phase-2 observability: wires the two Miki monitor objects into
+  // Provision so the serial console's `show` command can report their LIVE
+  // state (not just the stored NVS config) -- provision.h only stores these
+  // pointers here, same "never dereferences until an operator actually
+  // types a command" posture as &eventQueue/&totalizer above. Compiled in
+  // only under MIKI_WIRE_PROFILE, matching provision.h's own conditional
+  // signature -- a flag-less build's call here is unchanged.
+  provision.begin(&store, &eventQueue, &totalizer
+#if MIKI_WIRE_PROFILE
+                 , &pulsePlausibility, &sensorHealth
+#endif
+                 );
   Serial.printf("device_id=%s  boot_id=%u\n",
                 store.deviceId().c_str(), store.bootId());
   Serial.println("(serial console ready — type 'help')");
@@ -442,17 +436,22 @@ void loop() {
     crashStreakCleared = true;
   }
 
+  // ---- v1.3.1: at most ONE HTTPS transaction per loop iteration ----
+  // The watchdog is fed once per iteration (top of loop()). Push, config
+  // poll and OTA poll are each bounded to HTTPS_WORST_CASE_TXN_MS now, but
+  // their timers all start at boot and so fall due in the SAME iteration
+  // every 60 s / 300 s -- three back-to-back worst cases would still blow
+  // the window. Whichever is due first runs; the others run next iteration
+  // (a few ms later -- their timers stay due). Pushes every PUSH_PERIOD_MS
+  // are unaffected in the normal case because a healthy push completes in
+  // well under a second.
+  bool netSlotUsed = false;
+
   // ---- flush queue to the configured endpoint ----
   if (now - tPush >= PUSH_PERIOD_MS) {
     tPush = now;
-    // P1 hardening: offer the diag fragment only until it's actually been
-    // included in a sent request (diagAttempted) -- an empty-queue tick
-    // (n==0 inside pushOnce()) must not silently burn the "once per boot"
-    // opportunity. buildDiagJson_() itself is cheap (a handful of NVS/RAM
-    // reads), so recomputing it on every tick until consumed is fine.
-    bool diagAttempted = false;
-    bool acked = syncEngine.pushOnce(diagSentThisBoot ? String() : buildDiagJson_(), &diagAttempted);
-    if (diagAttempted) diagSentThisBoot = true;
+    netSlotUsed = true;
+    bool acked = syncEngine.pushOnce();
     // Mark firmware healthy after the device has proven it can reach the server.
     if (acked && !healthySignalled) {
       ota.confirmHealthyBoot();
@@ -461,8 +460,9 @@ void loop() {
   }
 
   // ---- poll K-factor / calibration config ----
-  if (now - tConfig >= CONFIG_POLL_MS) {
+  if (!netSlotUsed && now - tConfig >= CONFIG_POLL_MS) {
     tConfig = now;
+    netSlotUsed = true;
     syncEngine.pollConfig();
     if (syncEngine.online() && !healthySignalled) {
       ota.confirmHealthyBoot();
@@ -471,9 +471,19 @@ void loop() {
   }
 
   // ---- check for firmware updates ----
-  if (now - tOta >= OTA_POLL_MS) {
+  if (!netSlotUsed && now - tOta >= OTA_POLL_MS) {
     tOta = now;
     ota.poll(syncEngine.online(), syncEngine);    // DM-Phase 2: WiFi-authority consolidation -- may download + reboot into new image.
+
+    // Hand the OTA outcome to Sync so the next push carries it to the cloud.
+    // Without this the reason a meter refuses an update is visible only on its
+    // LAN endpoint and its serial console -- which means a person has to go to
+    // the plant to read it. OTA_ACCEPT is the enum's "nothing was rejected"
+    // value, so it maps to nullptr rather than being reported as a reason.
+    syncEngine.setOtaStatus(
+        otaStateStr(ota.state()),
+        ota.lastRejectReason() == OTA_ACCEPT ? nullptr
+                                             : otaVerdictStr(ota.lastRejectReason()));
                                                    // RISK-16: syncEngine also supplies the best-effort time estimate for manifest expiry checks.
   }
 

@@ -169,6 +169,56 @@
 #define OTA_POLL_MS           300000UL    // check for new firmware this often (5 min)
 #define WIFI_RETRY_MS         10000UL     // base backoff for reconnect
 
+// ---- HTTPS transaction bounds (v1.3.1) --------------------------------------
+// Every cloud call (push, config poll, OTA manifest, OTA image) runs on the
+// single cooperative loop task that also feeds the task watchdog. Until
+// v1.3.1 nothing bounded the TLS HANDSHAKE: arduino-esp32 2.0.x's
+// WiFiClientSecure defaults handshake_timeout to 120 s, and
+// HTTPClient::setTimeout() does NOT touch it. On a lossy-but-associated
+// link (a flaky Wi-Fi backhaul hop that keeps the ESP32 associated while
+// packets die upstream) a handshake can sit in its WANT_READ retry loop
+// for most of those 120 s -- longer than the 60 s watchdog. Live evidence,
+// Balaji meter 2026-08-22: 15 `watchdog` resets in one day, boot lifetimes
+// collapsing 5 h -> 13 min -> 6 min -> 22 s -> 13 s, and nginx logging 408
+// (headers received, body never arrived) at the exact minute of two of
+// the reboots -- the device was killed mid-request by its own watchdog.
+// Every watchdog reset then re-pushed the backlog over the same bad link
+// and stalled again: a crash loop with NO firmware bug in the pulse path.
+//
+// Handshake: 10 s. A healthy handshake against the pinned LE chain takes
+// ~1-2 s on this board; a link that cannot complete one in 10 s should
+// fail fast and let the existing push/OTA backoff widen the retry window
+// (PCNT keeps counting in hardware regardless -- no oil is lost by
+// failing a request, only by REBOOTING, which loses the un-checkpointed
+// accumulator).
+#define HTTPS_HANDSHAKE_TIMEOUT_S   10
+// TCP connect (HTTPClient::setConnectTimeout) -- made explicit so the
+// budget below is real, not an assumption about a library default.
+#define HTTPS_CONNECT_TIMEOUT_MS    5000
+// Idle I/O bound per read/write (HTTPClient::setTimeout) -- the push
+// value that has been in production since v1.0; config/manifest were 6 s
+// and the OTA image 15 s, now unified so one number feeds the budget.
+#define HTTPS_IO_TIMEOUT_MS         8000
+// Worst-case wall-clock for ONE HTTPS transaction on the 2.0.14 core,
+// derived from its actual code paths (not its documented behaviour):
+//   DNS (hostByName waits WIFI_DNS_DONE_BIT)            15 000 ms
+//   TCP connect (select, HTTPS_CONNECT_TIMEOUT_MS)         5 000 ms
+//   TLS handshake (setHandshakeTimeout)                 10 000 ms
+//   request write: send_ssl_data is bounded by socket_timeout (= the
+//     connect timeout) + one SO_SNDTIMEO; HTTPClient retries it once
+//                                 2 x (5 000 + 8 000) =  26 000 ms
+//   header wait: handleHeaderResponse idles HTTPS_IO_TIMEOUT_MS, but
+//     each connected()/available() probe can itself block one
+//     SO_RCVTIMEO                    8 000 + 2 x 8 000 =  24 000 ms
+//                                                  total  80 000 ms
+// and loop() now runs AT MOST ONE such transaction per watchdog feed
+// (covio_firmware.ino). WATCHDOG_TIMEOUT_S below must clear this total
+// with margin -- the static_assert next to it holds that invariant.
+#define HTTPS_WORST_CASE_TXN_MS  (15000UL + HTTPS_CONNECT_TIMEOUT_MS \
+                                  + (HTTPS_HANDSHAKE_TIMEOUT_S * 1000UL) \
+                                  + 2UL * (HTTPS_CONNECT_TIMEOUT_MS + HTTPS_IO_TIMEOUT_MS) \
+                                  + 3UL * HTTPS_IO_TIMEOUT_MS)
+
 // ---- DM-Phase 2 (WiFi provisioning: SoftAP + captive portal) ----------------
 // Bounded boot-time wait for the station connection kicked off at boot to
 // resolve, before falling back to AP-fallback provisioning mode (§3.1's
@@ -361,12 +411,18 @@
 // genuinely being made -- its own 15s stall detector aborts a dead
 // transfer long before this timeout).
 //
-// TIMEOUT CHOICE: must exceed the worst legitimate uninterrupted block --
-// push HTTP timeout 8s + TLS handshake, config poll 6s, captive-portal
-// credential test 15s -- with generous margin, because a false watchdog
-// reset in production is worse than slow hang detection (Phase-1 mandate:
-// "avoid false watchdog resets"). 60s catches every genuine hang while
-// sitting 4x above the worst legitimate stall.
+// TIMEOUT CHOICE: must exceed the worst legitimate uninterrupted block
+// with margin, because a false watchdog reset in production is worse
+// than slow hang detection (Phase-1 mandate: "avoid false watchdog
+// resets"). The original 60 s was reasoned from "push 8 s + handshake"
+// -- but the handshake was UNBOUNDED below 120 s (see the HTTPS
+// transaction bounds above), so in production the watchdog was firing
+// on legitimately-slow-but-progressing requests and CAUSING reboots,
+// not preventing them. v1.3.1 bounds every transaction to
+// HTTPS_WORST_CASE_TXN_MS (80 s, derived from the core's real code) and
+// allows one per loop iteration; 90 s sits above that worst case and
+// well above the captive-portal credential test (15 s). For a GENUINE
+// hang the difference between 60 and 90 s to reset is immaterial.
 //
 // The watchdog is armed at the END of setup(), deliberately AFTER the two
 // serviceable fatal-halt consoles (LittleFS-mount failure, RELEASE_BUILD
@@ -378,7 +434,15 @@
 #define WATCHDOG_ENABLE     1
 #endif
 #ifndef WATCHDOG_TIMEOUT_S
-#define WATCHDOG_TIMEOUT_S  60
+#define WATCHDOG_TIMEOUT_S  90
+#endif
+// The invariant the whole v1.3.1 fix rests on: one bounded HTTPS
+// transaction must always finish inside one watchdog window. Anyone who
+// raises an HTTPS_* bound or lowers the watchdog has to come back here.
+#if WATCHDOG_ENABLE
+static_assert((unsigned long)WATCHDOG_TIMEOUT_S * 1000UL > HTTPS_WORST_CASE_TXN_MS,
+              "WATCHDOG_TIMEOUT_S must exceed HTTPS_WORST_CASE_TXN_MS: a single "
+              "bounded HTTPS transaction could otherwise trip the watchdog");
 #endif
 
 // ---- Miki Wire profile (compile-time plant hardening layer) -----------------

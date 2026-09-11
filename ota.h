@@ -78,6 +78,19 @@
 // ---- DM-Phase 1 (local diagnostics, §13 A.4 ota_state enum) --------------
 enum OtaState { OTA_STATE_NONE, OTA_STATE_PENDING_VERIFY, OTA_STATE_CONFIRMED, OTA_STATE_FAILED };
 
+// Public stringifier for OtaState. It lives here, next to the enum, because
+// there are now two consumers -- the LAN diagnostics JSON and the cloud push
+// envelope -- and two hand-maintained copies of a switch over the same enum is
+// how they drift apart. diagnostics.h delegates to this.
+inline const char* otaStateStr(OtaState s) {
+  switch (s) {
+    case OTA_STATE_PENDING_VERIFY: return "pending_verify";
+    case OTA_STATE_CONFIRMED:      return "confirmed";
+    case OTA_STATE_FAILED:         return "failed";
+    default:                       return "none";
+  }
+}
+
 // RISK-16 remediation: manifest-authenticity rejection reasons, reported
 // alongside RISK-15's OtaVerdict via /api/v1/status so an operator can tell
 // "rejected for being a downgrade" apart from "rejected for a bad signature"
@@ -333,13 +346,15 @@ public:
     bool began;
     if (covioIsHttpsUrl(url)) {
       secureClient.setCACert(COVIO_PINNED_CA_CERT);
+      secureClient.setHandshakeTimeout(HTTPS_HANDSHAKE_TIMEOUT_S);   // v1.3.1: see config.h
       began = http.begin(secureClient, url);
     } else {
       began = http.begin(url);
     }
     if (!began) return;
     http.addHeader("X-Api-Key", st_->apiKey());
-    http.setTimeout(6000);
+    http.setConnectTimeout(HTTPS_CONNECT_TIMEOUT_MS);   // v1.3.1: explicit, budgeted
+    http.setTimeout(HTTPS_IO_TIMEOUT_MS);
     int code = http.GET();
     if (code != 200) { http.end(); return; }
 
@@ -576,12 +591,18 @@ private:
     bool began;
     if (covioIsHttpsUrl(binUrl)) {
       secureClient.setCACert(COVIO_PINNED_CA_CERT);
+      secureClient.setHandshakeTimeout(HTTPS_HANDSHAKE_TIMEOUT_S);   // v1.3.1: see config.h
       began = http.begin(secureClient, binUrl);
     } else {
       began = http.begin(binUrl);   // bench/dev http:// fallback -- see config.h
     }
     if (!began) { Serial.println("[OTA] download begin FAILED"); failed_ = true; return; }
-    http.setTimeout(15000);
+    // v1.3.1: the pre-stream part of the download (connect, handshake,
+    // headers) must fit the same watchdog budget as every other call; the
+    // streaming loop below keeps its own 15 s stall detector and feeds the
+    // watchdog through serviceCb_ while bytes flow.
+    http.setConnectTimeout(HTTPS_CONNECT_TIMEOUT_MS);
+    http.setTimeout(HTTPS_IO_TIMEOUT_MS);
 
     int code = http.GET();
     if (code != 200) {
