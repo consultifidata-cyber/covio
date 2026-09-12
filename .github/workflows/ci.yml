@@ -591,6 +591,16 @@ jobs:
             test_boot_health.cpp -o test_boot_health
           ./test_boot_health
 
+      # Sprint 4B physical bring-up: the unhealthy-boot streak's NVS key was
+      # 16 chars (limit 15) and silently never wrote on hardware. nvs_keys.h
+      # now declares + static_asserts every key store.h uses; this compiles
+      # that header on the host and re-checks the table.
+      - name: "Compile+run NVS key-length guard (Sprint 4B: KEY_TOO_LONG regression)"
+        working-directory: test/native_cpp
+        run: |
+          g++ -std=c++14 -Wall -I../..             test_nvs_keys.cpp -o test_nvs_keys
+          ./test_nvs_keys
+
       - name: Compile+run pulse-plausibility tests (Miki profile, F5)
         working-directory: test/native_cpp
         run: |
