@@ -6,8 +6,9 @@ Sensor: LJ12A3-4-Z/BX, NPN, Normally Open, inductive proximity.
 | Connection | Terminal |
 |---|---|
 | Sensor output (black) | DI1 |
-| Sensor 0V (blue) | DI COM |
-| Sensor +V (brown) | field-side supply, 7–36 V terminal block |
+| Sensor 0V (blue) | power negative / 0 V |
+| Sensor +V (brown) | field-side supply positive, 7–36 V terminal |
+| DI COM | field-side supply positive, +7–36 V |
 
 - DI1 maps to GPIO4 through the board's bidirectional optocoupler; the DI
   stage inverts (input active ⇒ GPIO reads LOW). PCNT counts rising edges —
