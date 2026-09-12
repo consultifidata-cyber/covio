@@ -601,6 +601,18 @@ jobs:
           g++ -std=c++14 -Wall -I../..             test_nvs_keys.cpp -o test_nvs_keys
           ./test_nvs_keys
 
+      # sync.h's extractLong_() (ack_seq / K-factor "version") used to
+      # accumulate into a 32-bit `long` with no overflow check -- the same
+      # defect class server_time_ms was already fixed for above. This
+      # suite proves the historical defect empirically before proving the
+      # fix (checked_field_parse.h::parseUint32Checked()).
+      - name: Compile+run checked-field-parse tests (ack_seq/version overflow fix)
+        working-directory: test/native_cpp
+        run: |
+          g++ -std=c++14 -Wall -I../.. \
+            test_checked_field_parse.cpp -o test_checked_field_parse
+          ./test_checked_field_parse
+
       - name: Compile+run pulse-plausibility tests (Miki profile, F5)
         working-directory: test/native_cpp
         run: |
