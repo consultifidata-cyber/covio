@@ -194,3 +194,26 @@ from this effort at all.
 F1 (network outage) → H1 (AP mode) → D1 (power cuts) → E2 (watchdog
 hang, WDT_TEST_BUILD image) → C3/C4 (rollover + ≥27 h endurance) → §16
 characterization at the machine → §17 thresholds → long-run`.
+
+---
+
+## Addendum — 2026-09-12: DI COM wiring correction (NPN)
+
+An earlier instruction in this project's wiring notes stated **"Sensor 0V →
+DI COM"** for the LJ12A3 NPN sensor. Bench validation on the non-production
+board (MAC E8:F6:0A:B8:B7:BC) and an independent review of the Waveshare
+ESP32-S3-POE-ETH-8DI-8DO documentation found that this conflicts with the
+board's NPN input topology: for an NPN (sinking) sensor on the board's
+bidirectional-optocoupler DI stage, **DICOM / COM connects to the positive
+supply**, and the sensor sinks the DI line low when it detects a target.
+
+The historical line above is left intact as the record of what was believed
+at the time. The verified, currently approved LJ12A3 NPN wiring is:
+
+- **BROWN → +7–36 V** (field-side supply positive)
+- **BLUE → 0 V / power negative**
+- **BLACK → DI1**
+- **DI COM → +7–36 V** (field-side supply positive)
+
+`deploy/miki-wire/wiring/WIRING.md` has been corrected to match. This changes
+only documentation; no firmware behavior, pin mapping, or GPIO changes.
