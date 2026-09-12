@@ -87,6 +87,65 @@ which simultaneously proves it runs AP-fallback-capable firmware.
 
 ---
 
+## Session 4 — 2026-08-11 ~09:30 — ⛔ STOP 1: BALAJI PRODUCTION DEVICE DETECTED ON THE BENCH
+
+A device appeared on COM6 (`VID_303A:PID_1001`, ESP32-S3 native USB-Serial/
+JTAG). Identification sequence and result:
+
+1. Read-only serial listen + `show` on COM6 @115200: zero bytes (no banner,
+   no console response).
+2. `esptool read_mac` (read-only; enters bootloader briefly, hard-resets
+   back to run): **ESP32-S3 rev v0.2, MAC `28:84:85:B2:E5:F4`**.
+3. Identity resolution: `Store::chipId()` prints the eFuse MAC via
+   little-endian `%04X%08X`, i.e. device_id hex = true-MAC bytes REVERSED.
+   `28:84:85:B2:E5:F4` reversed = `F4:E5:B2:85:84:28` →
+   **device_id `esp32-F4E5B2858428` = THE BALAJI PRODUCTION DEVICE**
+   (boot_id-54 unit, `data.funtastik.co.in`, clean `e5a593b` build).
+   Cross-check: not MW-001 (its true MAC would be `E0:72:A1:D1:4A:F8`).
+
+**Actions taken on the device: identification only.** The esptool read
+performed one hard reset back into its own firmware (a normal reboot the
+firmware is designed for — boot_id/restart counters increment; no flash,
+NVS, config, or data was written or erased). Nothing else was, or will be,
+executed against this unit.
+
+**Consequence (mandate §1/§27 STOP 1):** the end-to-end bench workflow is
+HALTED. This unit must not be used as the bench target. All hardware
+validation remains BLOCKED. Awaiting explicit owner instruction: disconnect
+the Balaji unit and connect a dedicated non-production ESP32-S3-POE-ETH-
+8DI-8DO bench device.
+
+Note for the record: the Balaji unit being on this bench (not at the plant)
+is itself operationally significant — while here, the Balaji deployment is
+necessarily not reporting from site. Its serial console was silent on CDC,
+consistent with its `e5a593b` build's console living on this same native-USB
+port but the running app producing no output at idle — not investigated
+further, out of scope without authorization.
+
+---
+
+## Session 4 addendum — accidental commit disclosure + live flash hazard
+
+1. **Disclosure:** commit `c303a8b` unintentionally swept in
+   `Docs/PLANT_PICKUP.md` via `git add -A` — a file that appeared in the
+   working tree at 2026-08-11 12:18 IST, not authored by this effort. It
+   is preserved as found (nothing altered). Reviewed after the fact, it
+   partially conflicts with this branch's actual state: it describes
+   per-product OTA identity (`hw_compat: miki-wire-v1`), per-product
+   release assets, a CI `PRODUCTS` list, `--publish/--unpublish` manifest
+   tooling, and FACTORY-ONLY full images — none of which exist on this
+   branch (verified by grep); and its "in AP mode this firmware stops
+   metering entirely" is true of the deployed images but corrected by this
+   branch's candidate (F3 fix). Its provenance/intent needs owner
+   clarification. Session policy changed: explicit per-file `git add`
+   only, no `-A`, in this shared tree.
+2. **⚠ LIVE HAZARD while the Balaji unit occupies COM6:**
+   `platformio.ini:77` hard-codes `upload_port = COM6` (a fact
+   PLANT_PICKUP.md itself warns about). Any habitual `pio run -t upload`
+   in this repo right now would flash THE BALAJI PRODUCTION DEVICE.
+   No upload of any kind will be run while STOP 1 stands; recommend
+   physically disconnecting the Balaji unit before any bench work.
+
 ## Required physical hardware (blocking everything below A-row procedures)
 
 1. **Waveshare ESP32-S3-POE-ETH-8DI-8DO** bench unit (NOT the MW-001
@@ -135,3 +194,26 @@ from this effort at all.
 F1 (network outage) → H1 (AP mode) → D1 (power cuts) → E2 (watchdog
 hang, WDT_TEST_BUILD image) → C3/C4 (rollover + ≥27 h endurance) → §16
 characterization at the machine → §17 thresholds → long-run`.
+
+---
+
+## Addendum — 2026-09-12: DI COM wiring correction (NPN)
+
+An earlier instruction in this project's wiring notes stated **"Sensor 0V →
+DI COM"** for the LJ12A3 NPN sensor. Bench validation on the non-production
+board (MAC E8:F6:0A:B8:B7:BC) and an independent review of the Waveshare
+ESP32-S3-POE-ETH-8DI-8DO documentation found that this conflicts with the
+board's NPN input topology: for an NPN (sinking) sensor on the board's
+bidirectional-optocoupler DI stage, **DICOM / COM connects to the positive
+supply**, and the sensor sinks the DI line low when it detects a target.
+
+The historical line above is left intact as the record of what was believed
+at the time. The verified, currently approved LJ12A3 NPN wiring is:
+
+- **BROWN → +7–36 V** (field-side supply positive)
+- **BLUE → 0 V / power negative**
+- **BLACK → DI1**
+- **DI COM → +7–36 V** (field-side supply positive)
+
+`deploy/miki-wire/wiring/WIRING.md` has been corrected to match. This changes
+only documentation; no firmware behavior, pin mapping, or GPIO changes.

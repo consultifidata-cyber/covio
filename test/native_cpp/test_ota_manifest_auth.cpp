@@ -116,6 +116,52 @@ TEST(test_time_validity_exact_boundary_values) {
 }
 
 // ---------------------------------------------------------------------------
+// P1 hardening: manifestHasRequiredFields() -- extracted from ota.h::poll()
+// so the required-signed-fields presence check (including hw_compat, newly
+// required) is host-testable without a network-coupled harness.
+// ---------------------------------------------------------------------------
+TEST(test_required_fields_all_present_passes) {
+  CHECK(manifestHasRequiredFields(/*imageSize*/1026688, /*sha256Len*/64, /*channelLen*/6,
+                                   /*issuedAt*/1000, /*expiresAt*/2000, /*manifestIdLen*/10,
+                                   /*keyIdLen*/22, /*sigB64Len*/88, /*hwCompatLen*/16) == true);
+  return true;
+}
+
+TEST(test_required_fields_missing_hw_compat_is_rejected) {
+  // The specific P1 tightening: hw_compat length 0 must now fail the
+  // required-fields gate, not silently pass through to a skipped
+  // hardware-match check downstream.
+  CHECK(manifestHasRequiredFields(1026688, 64, 6, 1000, 2000, 10, 22, 88, /*hwCompatLen*/0) == false);
+  return true;
+}
+
+TEST(test_required_fields_bad_sha256_length_is_rejected) {
+  CHECK(manifestHasRequiredFields(1026688, /*sha256Len*/63, 6, 1000, 2000, 10, 22, 88, 16) == false);
+  return true;
+}
+
+TEST(test_required_fields_negative_image_size_is_rejected) {
+  CHECK(manifestHasRequiredFields(/*imageSize*/-1, 64, 6, 1000, 2000, 10, 22, 88, 16) == false);
+  return true;
+}
+
+TEST(test_required_fields_missing_channel_manifest_id_key_id_or_signature_is_rejected) {
+  CHECK(manifestHasRequiredFields(1026688, 64, /*channelLen*/0, 1000, 2000, 10, 22, 88, 16) == false);
+  CHECK(manifestHasRequiredFields(1026688, 64, 6, 1000, 2000, /*manifestIdLen*/0, 22, 88, 16) == false);
+  CHECK(manifestHasRequiredFields(1026688, 64, 6, 1000, 2000, 10, /*keyIdLen*/0, 88, 16) == false);
+  CHECK(manifestHasRequiredFields(1026688, 64, 6, 1000, 2000, 10, 22, /*sigB64Len*/0, 16) == false);
+  return true;
+}
+
+TEST(test_required_fields_unparsed_issued_or_expires_at_is_rejected) {
+  // extractLong_() returns -1 on parse failure (see ota.h) -- must be
+  // rejected, not treated as a valid (if odd) timestamp value.
+  CHECK(manifestHasRequiredFields(1026688, 64, 6, /*issuedAt*/-1, 2000, 10, 22, 88, 16) == false);
+  CHECK(manifestHasRequiredFields(1026688, 64, 6, 1000, /*expiresAt*/-1, 10, 22, 88, 16) == false);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 int main() {
   int passed = 0, failed = 0;
   for (auto& t : g_tests) {

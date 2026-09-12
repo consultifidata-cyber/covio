@@ -39,14 +39,38 @@
 #include "wifi_provision.h"
 #include "queue.h"
 #include "totalizer.h"
+#if MIKI_WIRE_PROFILE
+// Phase-2 observability: needed only for the two monitor-pointer members/
+// params below, so `show` can report LIVE monitor state (not just the
+// stored config) without reaching into covio_firmware.ino's globals.
+// Guarded exactly like every other Miki-only include in this codebase --
+// absent entirely from a flag-less build's translation unit.
+#include "pulse_plausibility.h"
+#include "sensor_health.h"
+#endif
 
 class Provision {
 public:
   // EventQueue*/Totalizer* default nullptr so any pre-existing single-arg
   // begin(&store) call site still compiles -- reset_ack simply reports
   // "unavailable" if not wired, rather than being silently absent.
-  void begin(Store* st, EventQueue* q = nullptr, Totalizer* tot = nullptr) {
+  //
+  // Phase-2 observability: the two Miki monitor pointers are a COMPILE-TIME
+  // conditional addition to this signature (only exist in a
+  // MIKI_WIRE_PROFILE=1 build) rather than an unconditional extra pair of
+  // nullptr-default params -- a flag-less build's begin() signature is
+  // therefore byte-for-byte unchanged by this addition. Same "store the
+  // pointer, never dereference until an operator actually asks" posture as
+  // q_/tot_ above: begin() only assigns, `show` (below) is the only reader.
+  void begin(Store* st, EventQueue* q = nullptr, Totalizer* tot = nullptr
+#if MIKI_WIRE_PROFILE
+             , PulsePlausibilityMonitor* mikiPulse = nullptr, SensorHealthMonitor* mikiHealth = nullptr
+#endif
+             ) {
     st_ = st; q_ = q; tot_ = tot;
+#if MIKI_WIRE_PROFILE
+    mikiPulse_ = mikiPulse; mikiHealth_ = mikiHealth;
+#endif
   }
 
   void service() {
@@ -92,6 +116,36 @@ private:
       // parameters are confirmed; see config.h).
       Serial.printf("miki      : maxhz=%u suspect_gap_s=%u\n",
                     (unsigned)st_->mikiMaxPulseHz(), (unsigned)st_->mikiSuspectGapS());
+      // Phase-2 observability: this line's own existence already proves
+      // "compiled in" (a flag-less build has none of this `show` output at
+      // all) -- printed explicitly anyway so a reader of raw console output
+      // never has to infer that fact from absence-of-output. Per-monitor
+      // ENABLED/DISABLED below is OPERATIONAL status (threshold != 0),
+      // deliberately worded differently from "compiled" so the two
+      // questions ("is this build capable of it" vs "is it actually doing
+      // anything right now") are never conflated -- the whole point of this
+      // phase's observability requirement. Read-only: every value below
+      // comes from the monitors' own pre-existing public getters
+      // (pulse_plausibility.h/sensor_health.h) -- neither monitor's
+      // detection logic is touched by this addition.
+      Serial.println("miki profile : COMPILED");
+      if (mikiPulse_) {
+        Serial.printf("miki pulse-plausibility : %s  suspect=%s  peak_hz_observed=%u  violation_count=%u\n",
+                      mikiPulse_->maxHz() == 0 ? "DISABLED" : "ENABLED",
+                      mikiPulse_->suspect() ? "true" : "false",
+                      (unsigned)mikiPulse_->peakHzObserved(),
+                      (unsigned)mikiPulse_->violationCount());
+      } else {
+        Serial.println("miki pulse-plausibility : monitor not wired this build");
+      }
+      if (mikiHealth_) {
+        Serial.printf("miki sensor-health      : %s  state=%s  ms_since_last_pulse=%u\n",
+                      mikiHealth_->suspectThresholdMs() == 0 ? "DISABLED" : "ENABLED",
+                      sensorHealthStateStr(mikiHealth_->state()),
+                      (unsigned)mikiHealth_->msSinceLastPulse(millis()));
+      } else {
+        Serial.println("miki sensor-health      : monitor not wired this build");
+      }
 #endif
     } else if (line.startsWith("set url ")) {
       st_->setServerUrl(line.substring(8));
@@ -217,4 +271,9 @@ private:
   EventQueue* q_ = nullptr;
   Totalizer* tot_ = nullptr;
   String buf_;
+#if MIKI_WIRE_PROFILE
+  // Phase-2 observability: see begin()'s own comment above.
+  PulsePlausibilityMonitor* mikiPulse_ = nullptr;
+  SensorHealthMonitor* mikiHealth_ = nullptr;
+#endif
 };

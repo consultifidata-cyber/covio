@@ -584,6 +584,23 @@ jobs:
             test_ack_validation.cpp -o test_ack_validation
           ./test_ack_validation
 
+      - name: "Compile+run boot-health tests (P1 hardening: app-level rollback safety net)"
+        working-directory: test/native_cpp
+        run: |
+          g++ -std=c++14 -Wall -I../.. \
+            test_boot_health.cpp -o test_boot_health
+          ./test_boot_health
+
+      # Sprint 4B physical bring-up: the unhealthy-boot streak's NVS key was
+      # 16 chars (limit 15) and silently never wrote on hardware. nvs_keys.h
+      # now declares + static_asserts every key store.h uses; this compiles
+      # that header on the host and re-checks the table.
+      - name: "Compile+run NVS key-length guard (Sprint 4B: KEY_TOO_LONG regression)"
+        working-directory: test/native_cpp
+        run: |
+          g++ -std=c++14 -Wall -I../..             test_nvs_keys.cpp -o test_nvs_keys
+          ./test_nvs_keys
+
       - name: Compile+run pulse-plausibility tests (Miki profile, F5)
         working-directory: test/native_cpp
         run: |
@@ -613,6 +630,18 @@ jobs:
           g++ -std=c++14 -Wall -I../.. \
             test_timestamp_parse.cpp -o test_timestamp_parse
           ./test_timestamp_parse
+
+      # sync.h's extractLong_() (ack_seq / K-factor "version") used to
+      # accumulate into a 32-bit `long` with no overflow check -- the same
+      # defect class server_time_ms was already fixed for above. This
+      # suite proves the historical defect empirically before proving the
+      # fix (checked_field_parse.h::parseUint32Checked()).
+      - name: Compile+run checked-field-parse tests (ack_seq/version overflow fix)
+        working-directory: test/native_cpp
+        run: |
+          g++ -std=c++14 -Wall -I../.. \
+            test_checked_field_parse.cpp -o test_checked_field_parse
+          ./test_checked_field_parse
 
   # ---------------------------------------------------------------------
   # Desktop app -- Windows (the app's actual shipped target) and Ubuntu
