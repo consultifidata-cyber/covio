@@ -15,7 +15,7 @@
 #pragma once
 
 // ---- Firmware identity (bump on every release; OTA compares against this) ---
-#define FW_VERSION            "1.0.0"
+#define FW_VERSION            "1.4.0"
 #define DEVICE_MODEL          "covio-oilflow-v1"
 
 // ---- RISK-15 remediation (OTA anti-downgrade) --------------------------------
@@ -26,7 +26,7 @@
 // any candidate manifest whose security_version is lower than the highest
 // value this device has ever confirmed healthy on (Store::securityVersion(),
 // a durable NVS-backed floor -- see store.h and ota_version_policy.h).
-#define FW_SECURITY_VERSION    1
+#define FW_SECURITY_VERSION    2
 
 // ---- First-boot default endpoint (OVERRIDDEN by NVS after provisioning) -----
 // NOTE: use https:// in the field. sync.h/ota.h dispatch on server_url's own
