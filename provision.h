@@ -191,6 +191,8 @@ private:
       while (true) { sink++; }   // no feed, no yield-back to loop()
 #endif
 #if STATION_ENABLE
+    } else if (line.startsWith("seed ")) {
+      seed_(line);
     } else if (extra_ && extra_(line)) {
       // handled by the station console
 #endif
@@ -198,6 +200,39 @@ private:
       Serial.println("[PROV] unknown. type: help");
     }
   }
+
+#if STATION_ENABLE
+  // `seed <after_seq> <first_boot_id> <total> confirm` -- station replacement
+  // (S7). The three numbers come from Covio's Replace station, once. Refused
+  // unless the queue is empty (a spare must not carry rows under its old
+  // numbers) and the numbers parse; `confirm` must be typed. Reboot after.
+  void seed_(const String& line) {
+    unsigned long long a = 0, b = 0, t = 0;
+    char word[16] = {0};
+    int n = sscanf(line.c_str(), "seed %llu %llu %llu %15s", &a, &b, &t, word);
+    if (n < 3 || a > 0xFFFFFFFFULL || b == 0 || b > 0xFFFFFFFFULL) {
+      Serial.println("[SEED] usage: seed <after_seq> <first_boot_id> <total> confirm");
+      return;
+    }
+    if (!q_ || !tot_) {
+      Serial.println("[SEED] unavailable (queue/totalizer not wired this build)");
+      return;
+    }
+    if (q_->pendingCount() != 0) {
+      Serial.printf("[SEED] refused: %u rows still queued. Let them send (or 'recover_queue'), then seed.\n",
+                    (unsigned)q_->pendingCount());
+      return;
+    }
+    if (strcmp(word, "confirm") != 0) {
+      Serial.printf("[SEED] would continue the machine at seq>%llu, boot %llu, total %llu. "
+                    "Type the same line with ' confirm' to write it.\n", a, b, t);
+      return;
+    }
+    tot_->seedForReplacement((uint64_t)t, (uint32_t)a);
+    st_->seedNextBootId((uint32_t)b);
+    Serial.printf("[SEED] written: seq>%llu boot %llu total %llu. Type 'reboot'.\n", a, b, t);
+  }
+#endif
 
   // Plant-pilot activation remediation (credential-exposure closure):
   // the raw api_key was previously printed verbatim by "show" -- readable
