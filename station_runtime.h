@@ -107,6 +107,10 @@ class StationRuntime {
   // The latest lifetime total, for alert events only (informational).
   void setTotal(uint64_t total) { __atomic_store_n(&total_, total, __ATOMIC_RELAXED); }
 
+  // The existing monitors' verdict (MIKI_WIRE_PROFILE: implausible rate or a
+  // suspect idle), from the loop's telemetry tick. Suspect: no sound, fault light.
+  void setInputSuspect(bool suspect) { __atomic_store_n(&suspect_, suspect, __ATOMIC_RELAXED); }
+
   // Move events into the durable queue. `append` builds and stores one row
   // with the next seq; it is the loop's own code path (covio_firmware.ino).
   template <typename AppendFn>
@@ -321,7 +325,7 @@ class StationRuntime {
     in.total = __atomic_load_n(&total_, __ATOMIC_RELAXED);
     in.tap = tap;
     in.readerUp = reader_->up();
-    in.inputSuspect = false;  // MIKI_WIRE_PROFILE monitors live in the loop; wired in a later step
+    in.inputSuspect = __atomic_load_n(&suspect_, __ATOMIC_RELAXED);
     in.outputFault = !outputsOk_;
     TickOutput out;
     xSemaphoreTake(lock_, portMAX_DELAY);
@@ -392,6 +396,7 @@ class StationRuntime {
   volatile uint8_t lastBits_ = 0;
   uint16_t lastCount_ = 0;
   uint64_t total_ = 0;
+  bool suspect_ = false;
   volatile Light lastLight_ = L_OFF;
   volatile bool lastSounding_ = false;
   volatile uint32_t lastTickS_ = 0;

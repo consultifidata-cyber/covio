@@ -457,6 +457,7 @@ void loop() {
     sensorStuck.update(total, now);
 #if STATION_ENABLE
     stationRuntime.setTotal(total);
+    stationRuntime.setInputSuspect((row.quality & (QUALITY_SUSPECT_RATE | QUALITY_SENSOR_SUSPECT)) != 0);
 #endif
   }
 #if STATION_ENABLE
