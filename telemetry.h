@@ -24,6 +24,9 @@
 #include "queue.h"
 #include "store.h"
 #include "reset_reason.h"
+#if STATION_ENABLE
+#include "station_row.h"
+#endif
 
 class Telemetry {
 public:
@@ -80,6 +83,31 @@ public:
   // Both default to nullptr, and a nullptr is omitted rather than sent as the
   // string "null" -- absent means "this build/caller had nothing to say",
   // which is different from a JSON null meaning "asked, and there is none".
+#if STATION_ENABLE
+  // A station event as a queue row: the same 36 bytes, record_type 2.
+  static QRow buildStation(Store& st, const station::StationPayload& p, uint32_t seq,
+                           uint32_t ts) {
+    QRow r;
+    memset(&r, 0, sizeof(r));
+    r.magic = QROW_MAGIC;
+    r.schema_version = SCHEMA_VERSION_CURRENT;
+    r.record_type = RECORD_TYPE_STATION;
+    r.boot_id = st.bootId();
+    r.seq = seq;
+    r.ts = ts;
+    r.totalizer = p.arg;
+    r.quality = p.quality;
+    r.rssi_abs = p.aux;
+    return r;
+  }
+  // Set by the firmware when the station runs: {"cfg":N,"reader":0|1,"state":"..."}.
+  typedef String (*StationEnvelopeFn)();
+  static StationEnvelopeFn& stationEnvelope() {
+    static StationEnvelopeFn fn = nullptr;
+    return fn;
+  }
+#endif
+
   static String toJson(Store& st, const QRow* rows, int n,
                        const char* otaState = nullptr,
                        const char* otaReject = nullptr) {
@@ -154,10 +182,36 @@ public:
       s += ",\"security_version\":" + String(st.securityVersion());
       s += "}";
     }
+#if STATION_ENABLE
+    // Machine Station: the station's state, envelope-level like `ota` above
+    // (protocol.ts parseStationStatus). Absent from every other build.
+    if (stationEnvelope()) {
+      s += ",\"station\":";
+      s += stationEnvelope()();
+    }
+#endif
     s += ",\"records\":[";
     for (int i = 0; i < n; i++) {
       if (i) s += ",";
       const QRow& r = rows[i];
+#if STATION_ENABLE
+      // record_type 2 (station_row.h, SCHEMA_REGISTRY.md): the platform's
+      // station keys, and NEVER `totalizer`. record_type 1 below is unchanged.
+      if (r.record_type == RECORD_TYPE_STATION) {
+        station::StationPayload p = {r.totalizer, r.quality, r.rssi_abs};
+        char fields[192];
+        station::payloadJson(p, r.ts, fields, sizeof(fields));
+        s += "{\"schema_version\":" + String(r.schema_version);
+        s += ",\"record_type\":" + String(r.record_type);
+        s += ",\"boot_id\":" + String(r.boot_id);
+        s += ",\"seq\":" + String(r.seq);
+        s += ",\"ts\":" + String(r.ts);
+        s += ",";
+        s += fields;
+        s += "}";
+        continue;
+      }
+#endif
       s += "{\"schema_version\":" + String(r.schema_version);
       s += ",\"record_type\":"    + String(r.record_type);
       s += ",\"boot_id\":" + String(r.boot_id);

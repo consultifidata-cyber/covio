@@ -39,6 +39,9 @@
 #include "local_api.h"
 #include "wifi_provision.h"
 #include "sensor_stuck.h"  // Balaji V1 freeze remediation
+#if STATION_ENABLE
+#include "station_runtime.h"  // Machine Station -- STATION_ENABLE builds only
+#endif
 #if SENSOR_MODE == SENSOR_MODE_CT
 #include "sensor_ct.h"     // CT-clamp acquisition -- compiled ONLY into CT builds
 #endif
@@ -58,6 +61,37 @@ WifiProvision wifiProvision;    // DM-Phase 2: SoftAP + captive-portal provision
 // Balaji V1 freeze remediation (Product Readiness Review P1-2): heuristic
 // sensor-stuck-at-zero detector, see sensor_stuck.h.
 SensorStuckDetector sensorStuck(SENSOR_STUCK_THRESHOLD_MS);
+#if STATION_ENABLE
+// Machine Station. The console reader is how cards are "tapped" until a reader
+// model is selected (card_reader.h): BLOCKED ON BENCH HARDWARE for the real one.
+station::ConsoleCardReader stationReader;
+station::StationRuntime   stationRuntime;
+static long stationWallNow() { return syncEngine.estimatedUnixNow(); }
+static String stationEnvelopeJson() { return stationRuntime.envelopeJson(); }
+static bool stationConsole(const String& line) {
+  if (line == "station") {
+    stationRuntime.printStatus(Serial);
+    return true;
+  }
+  if (line.startsWith("station tap ")) {
+    String uid = line.substring(12);
+    uid.trim();
+    Serial.println(stationReader.inject(uid.c_str()) ? "[STATION] tap queued"
+                                                     : "[STATION] not a card UID (8-16 hex)");
+    return true;
+  }
+  if (line == "station test") {
+    stationRuntime.requestSelfTest();
+    Serial.println("[STATION] self-test: green 1 s, amber 1 s, red 1 s, sounder 1 s -- watch each");
+    return true;
+  }
+  if (line == "station help") {
+    Serial.println("station | station tap <uid> | station test");
+    return true;
+  }
+  return false;
+}
+#endif
 #if MIKI_WIRE_PROFILE
 // Miki Wire hardening (F5/F6): both constructed inert (0 = disabled) and
 // armed from validated NVS tunables in setup() -- INSUFFICIENT VERIFIED
@@ -237,6 +271,13 @@ void setup() {
   // regression the ack floor prevents the "every new row filtered as
   // already-acked" transmission deadlock. See ack_validation.h.
   seq = resumeSeqFloor(totalizer.lastSeq(), eventQueue.ackedSeq());
+#if STATION_ENABLE
+  // After the queue and seq are recovered: the station's events become rows
+  // with the next seq. Outputs start OFF (station_io.h).
+  Telemetry::stationEnvelope() = stationEnvelopeJson;
+  provision.setExtraCommand(stationConsole);
+  stationRuntime.begin(stationWallNow, &stationReader);
+#endif
 
   // 4) network + OTA trial-state check
   ota.begin(&store);
@@ -414,7 +455,21 @@ void loop() {
     // via isStuck()/msSinceLastChange() -- this is the ONLY call site that
     // mutates sensorStuck's state.
     sensorStuck.update(total, now);
+#if STATION_ENABLE
+    stationRuntime.setTotal(total);
+#endif
   }
+#if STATION_ENABLE
+  // The station's events, in the order they happened, each with the next seq:
+  // the loop is still the only writer of the durable queue and of seq.
+  stationRuntime.drainInto([&](const station::StationPayload& p, uint32_t ts) {
+    seq++;
+    QRow srow = Telemetry::buildStation(store, p, seq, ts);
+    eventQueue.append(srow);
+    totalizer.service(seq);
+  });
+  stationRuntime.failsafe();
+#endif
 
   // Balaji V1 freeze remediation (Product Readiness Review P1-1): a run
   // that survives HEALTHY_UPTIME_CLEARS_CRASH_STREAK_MS (config.h) is
@@ -460,6 +515,10 @@ void loop() {
   }
 
   // ---- check for firmware updates ----
+#if STATION_ENABLE
+  if (!netSlotUsed && syncEngine.online())
+    netSlotUsed = stationRuntime.pollConfig(store.serverUrl(), store.apiKey(), PATH_CONFIG);
+#endif
   if (!netSlotUsed && now - tOta >= OTA_POLL_MS) {
     tOta = now;
     ota.poll(syncEngine.online(), syncEngine);    // DM-Phase 2: WiFi-authority consolidation -- may download + reboot into new image.

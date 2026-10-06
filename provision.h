@@ -49,6 +49,12 @@ public:
     st_ = st; q_ = q; tot_ = tot;
   }
 
+  // An optional handler for commands this class does not know (the Machine
+  // Station's `station ...`, STATION_ENABLE builds only). Returns true when
+  // it handled the line. Unset in every other build.
+  typedef bool (*ExtraCommand)(const String& line);
+  void setExtraCommand(ExtraCommand fn) { extra_ = fn; }
+
   void service() {
     while (Serial.available()) {
       char c = (char)Serial.read();
@@ -182,6 +188,8 @@ private:
       volatile uint32_t sink = 0;
       while (true) { sink++; }   // no feed, no yield-back to loop()
 #endif
+    } else if (extra_ && extra_(line)) {
+      // handled by the station console
     } else {
       Serial.println("[PROV] unknown. type: help");
     }
@@ -217,4 +225,5 @@ private:
   EventQueue* q_ = nullptr;
   Totalizer* tot_ = nullptr;
   String buf_;
+  ExtraCommand extra_ = nullptr;
 };
