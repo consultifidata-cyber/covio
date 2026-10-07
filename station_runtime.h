@@ -60,6 +60,20 @@
 // Holds every event an 80 s stall of the loop can produce with a card tapped
 // every second (two events a tap at most): about 16 KB of RAM.
 #define STATION_EVENT_QUEUE_LEN 160
+
+// BENCH-ONLY test builds (machine-station-bench.md B07, B31). Never in a
+// release environment; pass with PLATFORMIO_BUILD_FLAGS=-DSTATION_GOVERNOR_TEST=N.
+//   1  the logic's request is replaced by "sound, always": proves the governor's
+//      own fence (10 s bursts, 60 s in ten minutes) on real hardware.
+//   2  DO4 is driven on once at start and NOTHING refreshes or clears it (no
+//      task, no failsafe): proves the physical fence -- a self-ending sounder or
+//      a time-limit relay -- with the output genuinely stuck on.
+#ifndef STATION_GOVERNOR_TEST
+#define STATION_GOVERNOR_TEST 0
+#endif
+#if STATION_GOVERNOR_TEST && defined(RELEASE_BUILD) && RELEASE_BUILD
+#error "STATION_GOVERNOR_TEST is a bench-only build"
+#endif
 #ifndef STATION_TASK_PERIOD_MS
 #define STATION_TASK_PERIOD_MS 20  // reader poll and output refresh
 #endif
@@ -103,6 +117,14 @@ class StationRuntime {
     int16_t c = 0;
     pcnt_get_counter_value(PCNT_UNIT_USED, &c);
     lastCount_ = (uint16_t)c;
+#if STATION_GOVERNOR_TEST == 2
+    {
+      OutputState stuck = {false, false, false, true};
+      outputs_.apply(stuck);
+      Serial.println("[STATION] BENCH TEST 2: DO4 forced ON and left on. The physical fence must stop the sound.");
+      return true;
+    }
+#endif
     xTaskCreatePinnedToCore(taskEntry, "station", 6144, this, 2, &task_, 1);
     Serial.printf("[STATION] started: reader=%s config=%s\n", reader_->kind(),
                   logic_->hasConfig() ? "restored" : "none (silent until one arrives)");
@@ -149,6 +171,9 @@ class StationRuntime {
   // Loop pass: the independent failsafe. A task that has stopped refreshing
   // the outputs gets them switched off here.
   void failsafe() {
+#if STATION_GOVERNOR_TEST == 2
+    return;  // bench test 2: nothing may switch DO4 off but the hardware
+#endif
     OutputState s = governor_.failsafe(millis());
     if (s.bits() == 0 && lastBits_ != 0) {
       if (xSemaphoreTake(lock_, 0) == pdTRUE) {
@@ -457,6 +482,9 @@ class StationRuntime {
     } else {
       selfTestUntil_ = 0;
     }
+#if STATION_GOVERNOR_TEST == 1
+    sounding = true;  // bench test 1: ask for sound for ever; the governor must fence it
+#endif
     OutputState s = governor_.refresh(light, sounding, now);
     xSemaphoreTake(lock_, portMAX_DELAY);
     outputsOk_ = outputs_.apply(s);
