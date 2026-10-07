@@ -39,6 +39,9 @@
 #include "local_api.h"
 #include "wifi_provision.h"
 #include "sensor_stuck.h"  // Balaji V1 freeze remediation
+#if STATION_ENABLE
+#include "station_runtime.h"  // Machine Station -- STATION_ENABLE builds only
+#endif
 #if SENSOR_MODE == SENSOR_MODE_CT
 #include "sensor_ct.h"     // CT-clamp acquisition -- compiled ONLY into CT builds
 #endif
@@ -58,6 +61,38 @@ WifiProvision wifiProvision;    // DM-Phase 2: SoftAP + captive-portal provision
 // Balaji V1 freeze remediation (Product Readiness Review P1-2): heuristic
 // sensor-stuck-at-zero detector, see sensor_stuck.h.
 SensorStuckDetector sensorStuck(SENSOR_STUCK_THRESHOLD_MS);
+#if STATION_ENABLE
+// Machine Station. The console reader is how cards are "tapped" until a reader
+// model is selected (card_reader.h): BLOCKED ON BENCH HARDWARE for the real one.
+station::ConsoleCardReader stationReader;
+station::StationRuntime   stationRuntime;
+static long stationWallNow() { return syncEngine.estimatedUnixNow(); }
+static bool stationTelemetryThisBoot = false;  // see the drain in loop()
+static String stationEnvelopeJson() { return stationRuntime.envelopeJson(); }
+static bool stationConsole(const String& line) {
+  if (line == "station") {
+    stationRuntime.printStatus(Serial);
+    return true;
+  }
+  if (line.startsWith("station tap ")) {
+    String uid = line.substring(12);
+    uid.trim();
+    Serial.println(stationReader.inject(uid.c_str()) ? "[STATION] tap queued"
+                                                     : "[STATION] not a card UID (8-16 hex)");
+    return true;
+  }
+  if (line == "station test") {
+    stationRuntime.requestSelfTest();
+    Serial.println("[STATION] self-test: green 1 s, amber 1 s, red 1 s, sounder 1 s -- watch each");
+    return true;
+  }
+  if (line == "station help") {
+    Serial.println("station | station tap <uid> | station test");
+    return true;
+  }
+  return false;
+}
+#endif
 #if MIKI_WIRE_PROFILE
 // Miki Wire hardening (F5/F6): both constructed inert (0 = disabled) and
 // armed from validated NVS tunables in setup() -- INSUFFICIENT VERIFIED
@@ -97,6 +132,12 @@ void covioBackgroundService() {
 }
 
 void setup() {
+#if STATION_ENABLE
+  // Before anything that can block or crash: the output expander survives a
+  // CPU reset, so whatever it drove before the reset is switched off first
+  // (station_io.h, Pca9554Outputs::earlyOff).
+  station::Pca9554Outputs::earlyOff();
+#endif
   Serial.begin(115200);
   delay(300);
   Serial.println("\n=== Covio Oil Flow Meter " FW_VERSION " ===");
@@ -237,6 +278,13 @@ void setup() {
   // regression the ack floor prevents the "every new row filtered as
   // already-acked" transmission deadlock. See ack_validation.h.
   seq = resumeSeqFloor(totalizer.lastSeq(), eventQueue.ackedSeq());
+#if STATION_ENABLE
+  // After the queue and seq are recovered: the station's events become rows
+  // with the next seq. Outputs start OFF (station_io.h).
+  Telemetry::stationEnvelope() = stationEnvelopeJson;
+  provision.setExtraCommand(stationConsole);
+  stationRuntime.begin(stationWallNow, &stationReader);
+#endif
 
   // 4) network + OTA trial-state check
   ota.begin(&store);
@@ -414,7 +462,38 @@ void loop() {
     // via isStuck()/msSinceLastChange() -- this is the ONLY call site that
     // mutates sensorStuck's state.
     sensorStuck.update(total, now);
+#if STATION_ENABLE
+    stationTelemetryThisBoot = true;
+    stationRuntime.setTotal(total);
+    stationRuntime.setInputSuspect((row.quality & (QUALITY_SUSPECT_RATE | QUALITY_SENSOR_SUSPECT)) != 0);
+    stationRuntime.setBacklog(eventQueue.pendingCount());
+#endif
   }
+#if STATION_ENABLE
+  // The station's events, in the order they happened, each with the next seq:
+  // the loop is still the only writer of the durable queue and of seq.
+  //
+  // Not before this boot's first telemetry row. A power cut between a row's
+  // write and its checkpoint leaves that row on flash with its seq not yet
+  // checkpointed, so the FIRST row after boot reuses the seq and the server
+  // keeps the earlier row and drops this one (resolveRecords: seq <= ack).
+  // That first row must be telemetry, whose total the next row repeats, and
+  // never a station event, which nothing would repeat.
+  if (stationTelemetryThisBoot) stationRuntime.drainInto([&](const station::StationPayload& p, uint32_t ts) {
+    seq++;
+    QRow srow = Telemetry::buildStation(store, p, seq, ts);
+    uint32_t failedBefore = eventQueue.failedWriteCount();
+    eventQueue.append(srow);
+    bool stored = eventQueue.failedWriteCount() == failedBefore;
+    // A row the flash refused gives its seq back: the server walks seqs
+    // without gaps and stops at a hole (resolveRecords), so a burned seq would
+    // freeze the ack for every row behind it, measurements included.
+    if (!stored) seq--;
+    totalizer.service(seq);
+    return stored;
+  });
+  stationRuntime.failsafe();
+#endif
 
   // Balaji V1 freeze remediation (Product Readiness Review P1-1): a run
   // that survives HEALTHY_UPTIME_CLEARS_CRASH_STREAK_MS (config.h) is
@@ -460,6 +539,10 @@ void loop() {
   }
 
   // ---- check for firmware updates ----
+#if STATION_ENABLE
+  if (!netSlotUsed && syncEngine.online())
+    netSlotUsed = stationRuntime.pollConfig(store.serverUrl(), store.apiKey(), PATH_CONFIG);
+#endif
   if (!netSlotUsed && now - tOta >= OTA_POLL_MS) {
     tOta = now;
     ota.poll(syncEngine.online(), syncEngine);    // DM-Phase 2: WiFi-authority consolidation -- may download + reboot into new image.

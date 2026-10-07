@@ -256,6 +256,11 @@ jobs:
       - name: Build Miki Wire hardened-profile firmware (esp32dev-mikiwire)
         run: pio run -e esp32dev-mikiwire
 
+      # Machine Station (station_runtime.h): the station build compiles. Not a
+      # bench proof -- outputs, sounder and reader are BENCH VERIFICATION REQUIRED.
+      - name: Build Machine Station firmware (esp32dev-mikiwire-station)
+        run: pio run -e esp32dev-mikiwire-station
+
       # ---- The two SHIPPING images -------------------------------------------
       # One source tree, two products. Both are RELEASE_BUILD=1 (real pinned CA,
       # real OTA public key, clean-tree build identity enforced) and both are
@@ -467,6 +472,28 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # Machine Station: the board's station logic against vectors generated
+      # from the platform's certified reference (covio
+      # scripts/station-parity-vectors.ts), the 36-byte row round trip, and the
+      # output governor's own limits. C++11, the board's toolchain.
+      - name: Machine Station host tests (parity, row, outputs, alert matrix, config)
+        working-directory: test/native_cpp
+        run: |
+          for t in test_station_parity test_station_row test_station_io test_station_alerts test_station_config; do
+            g++ -std=c++11 -O1 -Wall -Wextra -Icorun_shim -I. -I../.. "$t.cpp" -o "$t"
+            "./$t"
+          done
+
+      # The counter and the station together: the REAL totalizer.h and queue.h
+      # (compiled as the board compiles them, on an in-memory flash) with the
+      # station logic, through stalls, outages, power cuts and a full flash.
+      # The pulse total must come out exact. About a minute.
+      - name: Machine Station + counter co-run (pulse exactness)
+        working-directory: test/native_cpp
+        run: |
+          g++ -std=c++14 -O2 -Wall -Icorun_shim -I. -I../.. test_station_corun.cpp -o test_station_corun
+          ./test_station_corun
 
       - name: Compile RISK-04 queue fault-injection test harness
         working-directory: test/native_cpp

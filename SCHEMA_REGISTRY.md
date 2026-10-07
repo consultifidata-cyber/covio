@@ -25,6 +25,7 @@
 | record_type value | Name | Introduced | Notes |
 |---|---|---|---|
 | `1` | `TELEMETRY` | schema_version 1 (Phase 1 / ADR-001) | The only record_type defined as of Phase 1. Future record types (`HEALTH`, `LOG_REQUEST_RESPONSE`, etc.) are introduced in later phases per their own ADRs (ADR-002, ADR-012) without altering this entry. |
+| `2` | `STATION` | schema_version 1 (Machine Station, 2026-10-07) | A Machine Station event (card tap, alert, sound, quiet, config applied or refused, running again). Written only by `STATION_ENABLE=1` builds; same 36-byte `QRow`, different meaning of the three payload slots (below). |
 
 ---
 
@@ -111,6 +112,29 @@ No batch-envelope field, cadence, batch size (`PUSH_BATCH_MAX`), idempotency key
 
 ---
 
+## schema_version 1, record_type 2 (STATION) — Machine Station events
+
+Written by `STATION_ENABLE=1` builds only (`station_row.h`, `station_runtime.h`). The row is the **same 36-byte `QRow`** as record_type 1: magic, `schema_version` = 1, `record_type` = 2, `boot_id`, `seq` (the same global sequence as telemetry, written by the same loop), `ts` (uptime seconds of the event), then the three payload slots, then `crc32`. The queue, its CRC, checkpoints and replay are untouched.
+
+| Slot (record_type 1 name) | record_type 2 meaning |
+| --- | --- |
+| `totalizer` (uint64) | `arg`: card UID bytes, big-endian (tap); lifetime total (alert); config version (config applied / refused); quiet length in seconds (quiet card); count (sound events) |
+| `quality` (uint16) | low byte: event code (1–14, the platform's catalogue). High byte: tap → verdict (low 4 bits) and UID length in bytes (high 4 bits); quiet → source (1 card, 2 window); config refused → error code (`station_row.h` `CONFIG_ERRORS`) |
+| `rssi_abs` (uint16) | `aux`: tap → the card's number; alert / running → seconds from the stop's start (clamped at 65,535) |
+
+**Wire JSON** — the keys the platform parses (`covio` `src/lib/devices/station/protocol.ts`), and **never `totalizer`**, so a receiver that reads telemetry by `(boot_id, ts, totalizer)` can never mistake an event for a count:
+
+```json
+{"schema_version":1,"record_type":2,"boot_id":7,"seq":1042,"ts":3600,
+ "event":5,"uid":"04AAAA01","v":1,"n":1}
+```
+
+Limits, by design (platform decision MC-066): a UID is at most 8 bytes (ISO 14443 single and double size); a tap does not carry its config version (the platform resolves a card by the event's time, and every envelope carries `"station":{"cfg":N,...}`).
+
+**Envelope** (station builds only): `"station":{"cfg":<applied version>,"reader":0|1,"state":"ok"|"no_config"|"output_fault"}`.
+
+**This repository's local server** (`server/server.py`) does not know record_type 2 and quarantines it, which never affects telemetry or the ack. The platform is the receiver that interprets it.
+
 ## Storage format notes
 
 - The queue remains the existing single unbounded log file (`/queue/log.bin`) plus dual-slot CRC ack pointer (`/queue/ackA.bin` / `/queue/ackB.bin`). **Segmented storage, truncate-before-append, rotation, and the read-cursor redesign are explicitly out of scope for Phase 1 — they belong to Phase 2 / ADR-003.**
@@ -135,3 +159,4 @@ No batch-envelope field, cadence, batch size (`PUSH_BATCH_MAX`), idempotency key
 | 0 (implicit) | (none — no discriminator existed) | pre-ADR-001 | — | Original fixed, un-versioned `QRow`/JSON layout. |
 | 1 | 1 (`TELEMETRY`) | Phase 1 / ADR-001 | 2026-07-08 | Added `schema_version`/`record_type` discriminator fields to both the SD row and the wire JSON; published this registry; implemented the current+previous receiver acceptance rule. |
 | 1 | 1 (`TELEMETRY`) | Phase 1 / ADR-001 (ACR-001 correction) | 2026-07-08 | Corrected the receiver to stop treating `schema_version = 0` / missing `schema_version` as an accepted "previous" version — no registered previous version exists until schema_version 2 is published. Missing/unregistered versions are now quarantined, per ADR-001's forced-drain migration strategy. See `Docs/ACR-001-schema-version-zero-acceptance-window.md`. |
+| 1 | 2 (`STATION`) | Machine Station | 2026-10-07 | Added the station event row (same 36 bytes, new meaning of the payload slots for record_type 2 only) and its wire JSON. record_type 1 unchanged. |

@@ -32,6 +32,14 @@
 #define MIKI_WIRE_PROFILE 0
 #endif
 
+// Machine Station (covio docs/specs/machine-station*.md; station_runtime.h).
+// OFF in every build unless an environment turns it on: only Miki Wire's does
+// (platformio.ini). With it off, not one line of station code is compiled and
+// the firmware is byte-for-byte the v1.4.0 behaviour.
+#ifndef STATION_ENABLE
+#define STATION_ENABLE 0
+#endif
+
 // ---- Firmware identity (bump on every release; OTA compares against this) ---
 // FW_VERSION is a property of the SOURCE TREE, not of a product: both
 // products are cut from the same commit at the same version. What separates
