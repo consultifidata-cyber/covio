@@ -344,6 +344,15 @@
 // P0-4's FailureState, never on merely crossing this number).
 #define SD_QUEUE_DIR          "/queue"    // append-only event log lives here
 #define PUSH_BATCH_MAX        50          // max records per push request
+// The queue never takes the last QUEUE_RESERVE_BYTES of the partition, so the
+// totalizer checkpoint, the ack cursor, the failure record and (in station
+// builds) the station config always have blocks to be rewritten into, however
+// long the outage. 128 KB is 32 LittleFS blocks, 3.7 % of the partition,
+// ~3,600 rows (an hour) of history given up at the very end of a >27 h outage.
+#ifndef QUEUE_RESERVE_BYTES
+#define QUEUE_RESERVE_BYTES   (128UL * 1024UL)
+#endif
+#define QUEUE_SPACE_CHECK_EVERY 256UL   // appends between exact free-space measurements
 #define QUEUE_HIGHWATER       20000UL     // flag quality_code if backlog exceeds
 
 // ---- ADR-003 (Phase 2): segmented queue storage -----------------------------

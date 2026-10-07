@@ -102,6 +102,7 @@ enum QueueFailCode {
   QFAIL_SEGMENT_OPEN,       // LittleFS.open(path, FILE_APPEND) returned false
   QFAIL_TRUNCATE,           // truncate-before-append (torn-tail cleanup) failed
   QFAIL_WRITE_SHORT,        // f.write() wrote fewer bytes than sizeof(QRow), or open-for-write failed
+  QFAIL_RESERVE,            // refused: the row would eat into QUEUE_RESERVE_BYTES (config.h)
 };
 
 struct __attribute__((packed)) FailureState {
@@ -281,6 +282,21 @@ public:
       goodOffset  = 0;
     }
     String path = segmentPath_(activeSeg);
+
+    // ---- the reserve -----------------------------------------------------------
+    // The queue never takes the last QUEUE_RESERVE_BYTES of the partition.
+    // Without this it filled the filesystem until LittleFS refused a write,
+    // and from then on the SMALL files that keep the device honest shared the
+    // same zero free blocks: the totalizer checkpoint (rewritten every second,
+    // and opened with truncate -- a refused rewrite leaves its slot empty), the
+    // ack cursor and the failure record. A power cut in that state could bring
+    // the counter back from a checkpoint hours old, or from nothing. A refused
+    // row is counted like any other failed write, and the caller gives its seq
+    // back (covio_firmware.ino), so the server never waits at a hole.
+    if (!reserveAllows_()) {
+      recordReserveRefusal_();
+      return;
+    }
 
     // ---- determine actual on-disk size --------------------------------------
     // FILE_APPEND creates the segment file if this is its first row (same,
@@ -719,6 +735,7 @@ private:
       case QFAIL_SEGMENT_OPEN: return "segment_open_failed";
       case QFAIL_TRUNCATE:     return "truncate_failed";
       case QFAIL_WRITE_SHORT:  return "write_failed_or_short";
+      case QFAIL_RESERVE:      return "storage_reserve";
       default:                 return "none";
     }
   }
@@ -726,6 +743,40 @@ private:
   // Persists ONLY when called (i.e. only on an actual failure) -- never on
   // the hot per-second append path, so this adds no routine wear (see
   // FAIL_MAGIC's header comment and 06_FLASH_LIFETIME_ANALYSIS.md).
+  // Free space is measured exactly (LittleFS walks its blocks to answer, so
+  // not every second) every QUEUE_SPACE_CHECK_EVERY appends, and every 10 once
+  // within 16 KB of the reserve; between measurements each append is assumed
+  // to use one row. An ack that frees a segment is noticed at the next check.
+  bool reserveAllows_() {
+    if (spaceCheckIn_ == 0) {
+      size_t total = backend_->totalBytes();
+      size_t used = backend_->usedBytes();
+      freeEstimate_ = total > used ? total - used : 0;
+      bool near = freeEstimate_ < (size_t)QUEUE_RESERVE_BYTES + 16384;
+      spaceCheckIn_ = near ? 10 : QUEUE_SPACE_CHECK_EVERY;
+    } else {
+      spaceCheckIn_--;
+      freeEstimate_ = freeEstimate_ > sizeof(QRow) ? freeEstimate_ - sizeof(QRow) : 0;
+    }
+    return freeEstimate_ >= (size_t)QUEUE_RESERVE_BYTES + sizeof(QRow);
+  }
+
+  // A reserve refusal repeats every second for as long as the outage lasts,
+  // so its record is persisted at most once a minute (the count in RAM is
+  // exact; the persisted one lags by at most a minute).
+  void recordReserveRefusal_() {
+    uint32_t nowS = millis() / 1000;
+    if (fail_.failed_write_count == 0) fail_.first_failure_uptime_s = nowS;
+    fail_.failed_write_count++;
+    fail_.last_failure_uptime_s = nowS;
+    fail_.last_error_code = QFAIL_RESERVE;
+    if (!reservePersisted_ || nowS - lastReservePersistS_ >= 60) {
+      persistFail_();
+      reservePersisted_ = true;
+      lastReservePersistS_ = nowS;
+    }
+  }
+
   void recordWriteFailure_(QueueFailCode code) {
     uint32_t nowS = millis() / 1000;
     if (fail_.failed_write_count == 0) fail_.first_failure_uptime_s = nowS;
@@ -903,6 +954,12 @@ private:
 
   // ---- ADR-003 (Phase 2): segment naming + orphan cleanup ----------------
   static const int MAX_ORPHAN_CANDIDATES = 32;
+
+  // The reserve (see append()).
+  uint32_t spaceCheckIn_ = 0;
+  size_t freeEstimate_ = 0;
+  bool reservePersisted_ = false;
+  uint32_t lastReservePersistS_ = 0;
 
   static String segmentPath_(uint32_t id) {
     char buf[40];
