@@ -401,7 +401,15 @@ void loop() {
     if (pulsePlausibility.update(total, now))                    row.quality |= QUALITY_SUSPECT_RATE;
     if (sensorHealth.update(total, now) == SENSOR_HEALTH_SUSPECT) row.quality |= QUALITY_SENSOR_SUSPECT;
 #endif
+    uint32_t failedBefore = eventQueue.failedWriteCount();
     eventQueue.append(row);                      // 1) durable row FIRST
+    // A row the flash refused (full, or a write error) gives its seq back.
+    // The server walks seqs without gaps and STOPS at a hole (resolveRecords:
+    // a genuine gap is never skipped past), so a burned seq froze the ack for
+    // every later row until someone ran `reset_ack` on site. The pulse total is
+    // not at risk either way: the checkpoint below still records it, and the
+    // next row that is stored carries it.
+    if (eventQueue.failedWriteCount() != failedBefore) seq--;
     totalizer.service(seq);                 // 2) THEN checkpoint total+seq
     // ORDER MATTERS: if power dies between 1 and 2, this seq regenerates on
     // next boot and the duplicate row is absorbed by the server (idempotent).

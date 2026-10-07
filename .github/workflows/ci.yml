@@ -480,6 +480,15 @@ jobs:
         working-directory: test/native_cpp
         run: ./test_queue_fault_injection
 
+      # A row the full flash refuses must not burn its seq: the REAL totalizer.h
+      # and queue.h on an in-memory flash that fills, against a server that
+      # stops at a gap (protocol.ts resolveRecords).
+      - name: Full flash keeps seqs contiguous (real queue + totalizer)
+        working-directory: test/native_cpp
+        run: |
+          g++ -std=c++14 -O2 -Wall -Icorun_shim -I. -I../.. test_queue_full_seq.cpp -o test_queue_full_seq
+          ./test_queue_full_seq
+
       - name: Compile RISK-15 OTA anti-downgrade policy tests
         working-directory: test/native_cpp
         run: |
