@@ -6,6 +6,13 @@
 // full LittleFS does. Each write lands whole; torn writes are
 // test_queue_fault_injection.cpp's subject, not this one's.
 //
+// COPY-ON-WRITE, like LittleFS: a file opened with "w" keeps its old content
+// until close(). The new content needs its OWN free space while the old copy
+// still exists, and a rewrite that was refused anywhere is discarded at
+// close(), leaving the old copy. So when the partition is full, a small file
+// that is rewritten in place (the totalizer checkpoint, the ack cursor) stays
+// at its last successful version -- stale, never empty.
+//
 // POSIX truncate() -- which LittleFsBackend calls with a "/littlefs" prefix --
 // is defined by the test (one definition, one translation unit) and lands on
 // shimTruncate() below.
@@ -53,6 +60,7 @@ inline bool shimTruncate(const char* path, size_t len) {
 class File {
  public:
   File() {}
+  File(const std::string& path, bool dir, bool cow) : File(path, dir) { cow_ = cow; }
   File(const std::string& path, bool dir) : path_(path), open_(true), dir_(dir) {
     size_t slash = path.find_last_of('/');
     name_ = slash == std::string::npos ? path : path.substr(slash + 1);
@@ -79,6 +87,16 @@ class File {
     return k;
   }
   size_t write(const uint8_t* data, size_t n) {
+    if (cow_) {
+      if (shimFs().used() + pending_.size() + n > shimFs().capBytes) {
+        shimFs().refusedWrites++;
+        failed_ = true;
+        return 0;
+      }
+      pending_.insert(pending_.end(), data, data + n);
+      shimFs().writes++;
+      return n;
+    }
     if (shimFs().used() + n > shimFs().capBytes) {
       shimFs().refusedWrites++;
       return 0;
@@ -96,7 +114,10 @@ class File {
   }
   int available() const { return (int)(size() - (pos_ < size() ? pos_ : size())); }
   void flush() {}
-  void close() { open_ = false; }
+  void close() {
+    if (open_ && cow_ && !failed_) shimFs().files[path_] = pending_;
+    open_ = false;
+  }
   bool isDirectory() const { return dir_; }
   const char* name() const { return name_.c_str(); }
   File openNextFile() {
@@ -112,6 +133,9 @@ class File {
   size_t pos_ = 0;
   std::vector<std::string> listing_;
   size_t li_ = 0;
+  bool cow_ = false;
+  bool failed_ = false;
+  std::vector<uint8_t> pending_;
 };
 
 struct LittleFSShim {
@@ -119,7 +143,8 @@ struct LittleFSShim {
     std::string p(path);
     if (mode[0] == 'r' && shimFs().dirs.count(p)) return File(p, true);
     if (mode[0] == 'w') {
-      shimFs().files[p].clear();
+      shimFs().files[p];  // exists from now; its content changes only at close()
+      return File(p, false, true);
     } else if (mode[0] == 'a') {
       shimFs().files[p];  // create if absent, never truncate
     } else if (!shimFs().files.count(p)) {
