@@ -169,6 +169,38 @@ class OutputGovernor {
   bool faultLatched_ = false;
 };
 
+// Which uptime second the station task ticks, and when.
+//
+// One tick per uptime second, in order, never two for the same second: that is
+// what the logic (and its parity with the platform) assumes. But a tap must not
+// wait for the next whole second -- that put up to a second between a card and
+// its beep, against a target of 500 ms (S6 §20). So a tap takes the NEXT
+// second's tick at once: the station runs at most one second ahead of its
+// clock, never further, and a second tap inside that second waits for the
+// boundary. Pure and host-tested (test_station_io.cpp).
+class TickClock {
+ public:
+  void begin(uint32_t nowS) { last_ = nowS; }
+  // True when a tick is due now; `second` is the uptime second to tick.
+  bool due(uint32_t nowS, bool tapWaiting, uint32_t* second) {
+    if ((int32_t)(nowS - last_) >= 1) {
+      last_ = nowS;
+      *second = nowS;
+      return true;
+    }
+    if (tapWaiting && nowS == last_) {
+      last_ = nowS + 1;
+      *second = last_;
+      return true;
+    }
+    return false;
+  }
+  uint32_t last() const { return last_; }
+
+ private:
+  uint32_t last_ = 0;
+};
+
 }  // namespace station
 
 #if defined(ARDUINO)
@@ -182,6 +214,22 @@ class Pca9554Outputs {
   static const uint8_t ADDR = 0x20;
   static const uint8_t REG_OUTPUT = 0x01;
   static const uint8_t REG_CONFIG = 0x03;
+
+  // The FIRST thing setup() does in a station build, before the filesystem,
+  // the queue or the network. The expander is a separate chip: a watchdog or
+  // panic reset restarts the ESP32 but NOT the PCA9554, which keeps whatever
+  // it was driving. Without this, a sounder that was on when the CPU reset
+  // would stay on through every slow or failing step of boot (a filesystem
+  // that will not mount blocks setup() indefinitely). Writes only the output
+  // register: if the port is still inputs (a power-on reset), nothing changes.
+  // BENCH VERIFICATION REQUIRED (B01, B21, B25).
+  static bool earlyOff() {
+    Wire.begin(42, 41);
+    Wire.beginTransmission(ADDR);
+    Wire.write(REG_OUTPUT);
+    Wire.write(levels(0));
+    return Wire.endTransmission() == 0;
+  }
 
   bool begin() {
     Wire.begin(42, 41);

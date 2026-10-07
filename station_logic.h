@@ -653,7 +653,9 @@ class StationLogic {
       light = L_AMBER_BLINK;
     else if (alerting_ && !acknowledged_ && !quiet)
       light = L_RED_BLINK;
-    else if (stopOpen_ || quiet || acknowledged_)
+    // Green means pulses are arriving. A board that has not seen one since it
+    // booted is UNARMED and shows amber steady (Part 2 §D; rows 54-56).
+    else if (stopOpen_ || quiet || acknowledged_ || !hasLastPulse_)
       light = L_AMBER;
     else
       light = L_GREEN;

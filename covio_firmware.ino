@@ -67,6 +67,7 @@ SensorStuckDetector sensorStuck(SENSOR_STUCK_THRESHOLD_MS);
 station::ConsoleCardReader stationReader;
 station::StationRuntime   stationRuntime;
 static long stationWallNow() { return syncEngine.estimatedUnixNow(); }
+static bool stationTelemetryThisBoot = false;  // see the drain in loop()
 static String stationEnvelopeJson() { return stationRuntime.envelopeJson(); }
 static bool stationConsole(const String& line) {
   if (line == "station") {
@@ -131,6 +132,12 @@ void covioBackgroundService() {
 }
 
 void setup() {
+#if STATION_ENABLE
+  // Before anything that can block or crash: the output expander survives a
+  // CPU reset, so whatever it drove before the reset is switched off first
+  // (station_io.h, Pca9554Outputs::earlyOff).
+  station::Pca9554Outputs::earlyOff();
+#endif
   Serial.begin(115200);
   delay(300);
   Serial.println("\n=== Covio Oil Flow Meter " FW_VERSION " ===");
@@ -456,18 +463,34 @@ void loop() {
     // mutates sensorStuck's state.
     sensorStuck.update(total, now);
 #if STATION_ENABLE
+    stationTelemetryThisBoot = true;
     stationRuntime.setTotal(total);
     stationRuntime.setInputSuspect((row.quality & (QUALITY_SUSPECT_RATE | QUALITY_SENSOR_SUSPECT)) != 0);
+    stationRuntime.setBacklog(eventQueue.pendingCount());
 #endif
   }
 #if STATION_ENABLE
   // The station's events, in the order they happened, each with the next seq:
   // the loop is still the only writer of the durable queue and of seq.
-  stationRuntime.drainInto([&](const station::StationPayload& p, uint32_t ts) {
+  //
+  // Not before this boot's first telemetry row. A power cut between a row's
+  // write and its checkpoint leaves that row on flash with its seq not yet
+  // checkpointed, so the FIRST row after boot reuses the seq and the server
+  // keeps the earlier row and drops this one (resolveRecords: seq <= ack).
+  // That first row must be telemetry, whose total the next row repeats, and
+  // never a station event, which nothing would repeat.
+  if (stationTelemetryThisBoot) stationRuntime.drainInto([&](const station::StationPayload& p, uint32_t ts) {
     seq++;
     QRow srow = Telemetry::buildStation(store, p, seq, ts);
+    uint32_t failedBefore = eventQueue.failedWriteCount();
     eventQueue.append(srow);
+    bool stored = eventQueue.failedWriteCount() == failedBefore;
+    // A row the flash refused gives its seq back: the server walks seqs
+    // without gaps and stops at a hole (resolveRecords), so a burned seq would
+    // freeze the ack for every row behind it, measurements included.
+    if (!stored) seq--;
     totalizer.service(seq);
+    return stored;
   });
   stationRuntime.failsafe();
 #endif

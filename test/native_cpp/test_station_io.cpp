@@ -80,6 +80,50 @@ int main() {
     g.begin(0);
     EXPECT(g.refresh(L_OFF, false, 10).bits() == 0, "mode off: dark");
   }
+  // A governor restarted (reboot, watchdog reset) starts dark, whatever the
+  // previous one was doing.
+  {
+    OutputGovernor g;
+    g.begin(0);
+    g.refresh(L_RED_BLINK, true, 1000);
+    OutputGovernor after;
+    after.begin(1000);
+    EXPECT(after.failsafe(1001).bits() == 0, "a restarted governor is dark");
+  }
+
+  // TickClock: one tick per uptime second, in order, never two for one second;
+  // a tap is served at once (at most one second ahead), never waits a second.
+  {
+    TickClock c;
+    c.begin(100);
+    uint32_t s = 0;
+    EXPECT(!c.due(100, false, &s), "no tick inside the same second");
+    EXPECT(c.due(101, false, &s) && s == 101, "the boundary ticks");
+    EXPECT(c.due(101, true, &s) && s == 102, "a tap takes the next second's tick at once");
+    EXPECT(!c.due(101, true, &s), "a second tap in that second waits");
+    EXPECT(!c.due(102, false, &s), "the early tick is not repeated at its boundary");
+    EXPECT(c.due(103, false, &s) && s == 103, "then ticks resume in order");
+    EXPECT(c.due(110, false, &s) && s == 110, "a late task ticks the current second");
+  }
+  // Tap-to-tick latency across a whole second of tap times: never a wait for
+  // the boundary (the task polls every STATION_TASK_PERIOD_MS = 20 ms).
+  {
+    uint32_t worstMs = 0;
+    for (uint32_t tapMs = 0; tapMs < 1000; tapMs += 10) {
+      TickClock c;
+      c.begin(0);
+      uint32_t s = 0;
+      uint32_t firstPollMs = ((tapMs + 19) / 20) * 20;  // the next 20 ms poll
+      bool served = c.due(firstPollMs / 1000, true, &s);
+      uint32_t waited = served ? firstPollMs - tapMs : 1000;
+      if (waited > worstMs) worstMs = waited;
+    }
+    EXPECT(worstMs <= 20, "a tap is ticked within one poll period");
+    printf("     tap -> tick: worst %u ms in the task (target < 500 ms tap-to-beep; the reader's "
+           "own read time is BENCH REQUIRED)\n",
+           worstMs);
+  }
+
   printf("%s station_io: %d failure(s)\n", g_fail ? "FAIL" : "ok  ", g_fail);
   return g_fail ? 1 : 0;
 }

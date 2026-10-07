@@ -477,13 +477,23 @@ jobs:
       # from the platform's certified reference (covio
       # scripts/station-parity-vectors.ts), the 36-byte row round trip, and the
       # output governor's own limits. C++11, the board's toolchain.
-      - name: Machine Station host tests (parity, row, output governor)
+      - name: Machine Station host tests (parity, row, outputs, alert matrix, config)
         working-directory: test/native_cpp
         run: |
-          for t in test_station_parity test_station_row test_station_io; do
-            g++ -std=c++11 -O1 -Wall -Wextra -I. -I../.. "$t.cpp" -o "$t"
+          for t in test_station_parity test_station_row test_station_io test_station_alerts test_station_config; do
+            g++ -std=c++11 -O1 -Wall -Wextra -Icorun_shim -I. -I../.. "$t.cpp" -o "$t"
             "./$t"
           done
+
+      # The counter and the station together: the REAL totalizer.h and queue.h
+      # (compiled as the board compiles them, on an in-memory flash) with the
+      # station logic, through stalls, outages, power cuts and a full flash.
+      # The pulse total must come out exact. About a minute.
+      - name: Machine Station + counter co-run (pulse exactness)
+        working-directory: test/native_cpp
+        run: |
+          g++ -std=c++14 -O2 -Wall -Icorun_shim -I. -I../.. test_station_corun.cpp -o test_station_corun
+          ./test_station_corun
 
       - name: Compile RISK-04 queue fault-injection test harness
         working-directory: test/native_cpp
