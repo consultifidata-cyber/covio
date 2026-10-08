@@ -62,6 +62,15 @@ public:
   // ---- identity ----
   String  deviceId()   { return chipId(); }         // stable, from MAC
   uint32_t bootId()    { return bootId_; }
+#if STATION_ENABLE
+  // Station replacement (S7, Part 3 §S): the NEXT power-up uses exactly
+  // `firstBootId`, continuing the machine's boots so the platform never times
+  // the spare's records against the old board's boot. Takes effect on reboot.
+  void seedNextBootId(uint32_t firstBootId) {
+    if (firstBootId == 0) return;
+    p_.putULong(NVS_KEY_BOOT_ID, firstBootId - 1);
+  }
+#endif
 
   // ---- endpoint / auth (the upstream-agnostic bit) ----
   String serverUrl()   { return p_.getString(NVS_KEY_SERVER_URL, DEFAULT_SERVER_URL); }

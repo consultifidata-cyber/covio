@@ -138,6 +138,22 @@ public:
 
   uint32_t lastSeq() { return cp_.seq; }
 
+#if STATION_ENABLE
+  // Station replacement (S7, Part 3 §S): continue the MACHINE's lifetime total
+  // and sequence on a spare board. Writes the same dual-slot checkpoint every
+  // service() writes; nothing else changes. Called only from the console's
+  // `seed ... confirm`, only with an empty queue, then the board reboots.
+  // ⚠ MEASURING PATH: second signature and a bench proof before any site.
+  void seedForReplacement(uint64_t total, uint32_t seq) {
+    pcnt_counter_clear(PCNT_UNIT_USED);
+    base_ = total;
+    accumulated_ = 0;
+    cp_.total = total;
+    cp_.seq = seq;
+    persist_();
+  }
+#endif
+
   // ---- CT-clamp enhancement (SENSOR_MODE_CT builds only) -------------------
   // Feeds software-synthesized pulses (sensor_ct.h's time-integrated
   // current-presence stream) into the SAME accumulator the PCNT drain path
