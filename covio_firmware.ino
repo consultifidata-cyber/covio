@@ -41,6 +41,9 @@
 #include "sensor_stuck.h"  // Balaji V1 freeze remediation
 #if STATION_ENABLE
 #include "station_runtime.h"  // Machine Station -- STATION_ENABLE builds only
+#if STATION_READER_WIEGAND
+#include "wiegand.h"          // 125 kHz reader on DI2/DI3
+#endif
 #endif
 #if SENSOR_MODE == SENSOR_MODE_CT
 #include "sensor_ct.h"     // CT-clamp acquisition -- compiled ONLY into CT builds
@@ -62,9 +65,14 @@ WifiProvision wifiProvision;    // DM-Phase 2: SoftAP + captive-portal provision
 // sensor-stuck-at-zero detector, see sensor_stuck.h.
 SensorStuckDetector sensorStuck(SENSOR_STUCK_THRESHOLD_MS);
 #if STATION_ENABLE
-// Machine Station. The console reader is how cards are "tapped" until a reader
-// model is selected (card_reader.h): BLOCKED ON BENCH HARDWARE for the real one.
+// Machine Station. The console reader "taps" cards from the serial console in
+// every build; with STATION_READER_WIEGAND the 125 kHz reader on DI2/DI3 sits
+// beside it (wiegand.h).
 station::ConsoleCardReader stationReader;
+#if STATION_READER_WIEGAND
+station::WiegandCardReader stationWiegand;
+station::WithConsole       stationCards(&stationWiegand, &stationReader);
+#endif
 station::StationRuntime   stationRuntime;
 static long stationWallNow() { return syncEngine.estimatedUnixNow(); }
 static bool stationTelemetryThisBoot = false;  // see the drain in loop()
@@ -86,10 +94,21 @@ static bool stationConsole(const String& line) {
     Serial.println("[STATION] self-test: green 1 s, amber 1 s, red 1 s, sounder 1 s -- watch each");
     return true;
   }
+#if STATION_READER_WIEGAND
+  if (line == "station wiegand") {
+    stationWiegand.printStats(Serial);
+    return true;
+  }
+  if (line == "station help") {
+    Serial.println("station | station tap <uid> | station test | station wiegand");
+    return true;
+  }
+#else
   if (line == "station help") {
     Serial.println("station | station tap <uid> | station test");
     return true;
   }
+#endif
   return false;
 }
 #endif
@@ -283,7 +302,12 @@ void setup() {
   // with the next seq. Outputs start OFF (station_io.h).
   Telemetry::stationEnvelope() = stationEnvelopeJson;
   provision.setExtraCommand(stationConsole);
+#if STATION_READER_WIEGAND
+  stationWiegand.begin(PIN_WIEGAND_D0, PIN_WIEGAND_D1);
+  stationRuntime.begin(stationWallNow, &stationCards);
+#else
   stationRuntime.begin(stationWallNow, &stationReader);
+#endif
 #endif
 
   // 4) network + OTA trial-state check
