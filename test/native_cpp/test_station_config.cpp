@@ -168,7 +168,7 @@ static void testValidation() {
   std::string bigN = configBody(8, 4, 10, 0);
   bigN.replace(bigN.find("N=3"), 3, "N=6");
   std::string shortT = configBody(8, 4, 10, 0);
-  shortT.replace(shortT.find("T=180\n"), 6, "T=30\n");
+  shortT.replace(shortT.find("T=180\n"), 6, "T=5\n");  // D-285: the floor is 10 s
   std::string tooMany = configBody(8, 64, 961, 0);  // 1,025 cards
   std::string badCard = configBody(8, 4, 10, 0, "K=XYZ,A,1\n");
   std::string badWindow = configBody(8, 4, 10, 0, "W=1:00-2:00\n");
@@ -181,7 +181,9 @@ static void testValidation() {
   bad.push_back({"a required field missing (T)", missingT, "missing:T"});
   bad.push_back({"mode out of range", badMode, "mode"});
   bad.push_back({"more announcements than the cap", bigN, "cap:N"});
-  bad.push_back({"stop allowance under 60 s", shortT, "range:T"});
+  bad.push_back({"stop allowance under 10 s", shortT, "range:T"});
+  std::string badGap = configBody(8, 4, 10, 0, "GAP=0\n");
+  bad.push_back({"a GAP of 0 (D-285)", badGap, "range:GAP"});
   bad.push_back({"1,025 cards (over the limit)", tooMany, "truncated"});
   bad.push_back({"a malformed card line", badCard, "card"});
   bad.push_back({"a malformed quiet window", badWindow, "window"});
