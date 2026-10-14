@@ -103,6 +103,14 @@ static bool stationConsole(const String& line) {
     stationWiegand.printRaw(Serial);
     return true;
   }
+#endif
+  if (line == "station pulses") {
+    // The counter's lifetime total, for the bench: count N pulses, read the
+    // difference.
+    Serial.printf("station pulses: total=%llu\n", (unsigned long long)totalizer.total());
+    return true;
+  }
+#if STATION_READER_WIEGAND
   if (line == "station help") {
     Serial.println("station | station tap <uid> | station test | station wiegand [raw]");
     return true;
