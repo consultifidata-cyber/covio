@@ -54,14 +54,47 @@ static const uint32_t SOUNDER_WINDOW_MAX_S = 60;
 static const uint32_t HEARTBEAT_MS = 3000;
 static const uint32_t BLINK_HALF_MS = 500;
 
+// The reader's own BEEP (YELLOW) and LED (BLUE) control wires: the board pulls
+// them to 0 V only for a card IT decoded, so the loud reader beeper and its
+// green LED become the board's confirmation (bench, 14 Oct 2026: the reader's
+// beeper drowned the onboard one). DO5 and DO6 were spare.
+#ifndef STATION_CH_READER_BEEP
+#define STATION_CH_READER_BEEP 4  // DO5 <- reader YELLOW
+#endif
+#ifndef STATION_CH_READER_LED
+#define STATION_CH_READER_LED 5  // DO6 <- reader BLUE
+#endif
+
+// The reader ALWAYS gives its own short beep and green flash on any read
+// (bench, 14 Oct 2026; not switchable from its wires), so the board's answer
+// on the reader's beeper waits READER_BEEP_DELAY_MS and is counted, never one
+// short beep: accepted = 2 short, person = 3 short, refused = 1 long. Nothing
+// extra means the board did not get the card -- tap again.
+static const uint32_t READER_BEEP_DELAY_MS = 250;
+static const uint32_t READER_BEEP_END_MS = READER_BEEP_DELAY_MS + 600;
+
+// `beep`: 1 accepted, 2 person, 3 refused (station_logic.h's Beep); `t` ms
+// since the tap's feedback began.
+inline bool readerBeepOn(uint8_t beep, uint32_t t) {
+  if (t < READER_BEEP_DELAY_MS) return false;
+  t -= READER_BEEP_DELAY_MS;
+  if (beep == 3) return t < 500;
+  uint32_t shorts = beep == 1 ? 2 : beep == 2 ? 3 : 0;
+  return t / 200 < shorts && t % 200 < 100;
+}
+
+// Aggregate on purpose: `{red, amber, green, sounder}` leaves the reader
+// feedback off, so every fail-safe and governor path stays as it was.
 struct OutputState {
-  bool red, amber, green, sounder;
+  bool red, amber, green, sounder, readerBeep, readerLed;
   uint8_t bits() const {
     uint8_t b = 0;
     if (red) b |= (uint8_t)(1u << STATION_CH_RED);
     if (amber) b |= (uint8_t)(1u << STATION_CH_AMBER);
     if (green) b |= (uint8_t)(1u << STATION_CH_GREEN);
     if (sounder) b |= (uint8_t)(1u << STATION_CH_SOUNDER);
+    if (readerBeep) b |= (uint8_t)(1u << STATION_CH_READER_BEEP);
+    if (readerLed) b |= (uint8_t)(1u << STATION_CH_READER_LED);
     return b;
   }
 };
@@ -98,7 +131,7 @@ class OutputGovernor {
 
  private:
   OutputState compute(uint32_t nowMs) {
-    OutputState s = {false, false, false, false};
+    OutputState s = {false, false, false, false, false, false};
     accountSound(nowMs);
     if (!started_ || nowMs - lastRefreshMs_ > HEARTBEAT_MS) {
       setSounder(false, nowMs);
