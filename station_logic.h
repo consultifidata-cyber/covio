@@ -59,7 +59,14 @@ enum : uint8_t {
 static const uint32_t CAP_BURST_S = 10;
 static const uint32_t CAP_PER_STOP = 5;
 static const uint32_t CAP_SECONDS_PER_STOP = 60;
-static const uint32_t ARM_AFTER_RUNNING_S = 60;
+// D-285: 0 -- the station arms on the first pulse (was 60 s of steady running).
+static const uint32_t ARM_AFTER_RUNNING_S = 0;
+// D-285: seconds without a pulse before the machine reads stopped, when the
+// body carries no GAP; and the GAP and T a body may carry.
+static const int64_t DEFAULT_GAP_S = 1;
+static const int64_t GAP_MIN_S = 1;
+static const int64_t GAP_MAX_S = 60;
+static const int64_t MIN_STOP_ALLOWANCE_S = 10;
 static const uint32_t SAME_CARD_IGNORE_S = 3;
 static const double FULL_SPOOL_SHARE = 0.96;
 static const uint32_t ANNOUNCEMENT_S = 4;
@@ -95,6 +102,7 @@ struct Config {
   int64_t recoverS;
   int64_t correctS;
   int64_t tzMinutes;
+  int64_t gapS;  // D-285
   int windowCount;
   Window windows[MAX_WINDOWS];
   int cardCount;
@@ -219,6 +227,8 @@ inline bool parseConfigBody(const char* body, Config* out, char* err, size_t err
   bool endNaN = false;
   int64_t endValue = 0;
   bool overflowCards = false;
+  KV gapKv;
+  memset(&gapKv, 0, sizeof(gapKv));
 
   const char* p = body;
   int lineNo = 0;
@@ -325,6 +335,12 @@ inline bool parseConfigBody(const char* body, Config* out, char* err, size_t err
           else
             for (size_t i = a; i < b; i++) endValue = endValue * 10 + (v[i] - '0');
         }
+      } else if (keyFits && strcmp(key, "GAP") == 0) {
+        gapKv.seen = true;
+        gapKv.longValue = vlen >= sizeof(gapKv.value);
+        size_t gn = gapKv.longValue ? sizeof(gapKv.value) - 1 : vlen;
+        memcpy(gapKv.value, v, gn);
+        gapKv.value[gn] = 0;
       } else if (keyFits) {
         for (int i = 0; i < NREQ; i++) {
           if (strcmp(key, REQUIRED[i]) == 0) {
@@ -365,9 +381,19 @@ inline bool parseConfigBody(const char* body, Config* out, char* err, size_t err
     setErr("cap:seconds");
     return false;
   }
-  if (values[2] < 60) {
+  if (values[2] < MIN_STOP_ALLOWANCE_S) {
     setErr("range:T");
     return false;
+  }
+  // GAP is optional (D-285): without it the machine reads stopped after one
+  // second, as before.
+  int64_t gapS = DEFAULT_GAP_S;
+  if (gapKv.seen) {
+    if (gapKv.longValue || !parseSmallInt(gapKv.value, &gapS) || gapS < GAP_MIN_S ||
+        gapS > GAP_MAX_S) {
+      setErr("range:GAP");
+      return false;
+    }
   }
   out->version = (uint32_t)values[0];
   out->mode = (int)values[1];
@@ -381,6 +407,7 @@ inline bool parseConfigBody(const char* body, Config* out, char* err, size_t err
   out->recoverS = values[9];
   out->correctS = values[10];
   out->tzMinutes = values[11];
+  out->gapS = gapS;
   qsort(out->cards, out->cardCount, sizeof(Card), cardCmp);
   return true;
 }
@@ -489,7 +516,7 @@ class StationLogic {
       if (hasRecoveredRunStart_ && c && t - recoveredRunStart_ >= c->recoverS) {
         endStopContext();
       }
-    } else if (hasLastPulse_ && !stopOpen_ && t - lastPulseS_ >= 1) {
+    } else if (hasLastPulse_ && !stopOpen_ && t - lastPulseS_ >= (c ? c->gapS : DEFAULT_GAP_S)) {
       lastRunPulses_ = runPulses_;
       hasRunSince_ = false;
       hasRecoveredRunStart_ = false;

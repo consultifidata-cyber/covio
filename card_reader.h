@@ -2,8 +2,9 @@
 //
 // The reader is NOT CHOSEN (Machine Station Part 1 §L: 13.56 MHz, RS485,
 // 12-24 V, a published protocol, IP-rated; MODEL TO BE SELECTED AFTER BENCH
-// TEST). So this file defines what the station needs from any reader and two
-// implementations that are honest about that:
+// TEST). The bench board runs a 125 kHz Wiegand reader instead (wiegand.h,
+// STATION_READER_WIEGAND=1). This file defines what the station needs from any
+// reader and the implementations that are honest about that:
 //
 //   ConsoleCardReader -- cards "tapped" from the serial console
 //                        (`station tap <uid>`) or the bench script. It is how
@@ -75,6 +76,22 @@ class ConsoleCardReader : public CardReader {
  private:
   char pending_[17] = {0};
   bool has_ = false;
+};
+
+// The real reader with the console beside it: `station tap` keeps working as a
+// commissioning aid on a board that has a reader. The real reader's state is
+// the one reported.
+class WithConsole : public CardReader {
+ public:
+  WithConsole(CardReader* reader, ConsoleCardReader* console)
+      : reader_(reader), console_(console) {}
+  bool poll(char* uid) override { return reader_->poll(uid) || console_->poll(uid); }
+  bool up() const override { return reader_->up(); }
+  const char* kind() const override { return reader_->kind(); }
+
+ private:
+  CardReader* reader_;
+  ConsoleCardReader* console_;
 };
 
 // BLOCKED ON BENCH HARDWARE: no reader model is selected, so there is no

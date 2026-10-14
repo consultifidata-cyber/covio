@@ -80,6 +80,45 @@ int main() {
     g.begin(0);
     EXPECT(g.refresh(L_OFF, false, 10).bits() == 0, "mode off: dark");
   }
+  // The reader's beeper and LED are DO5 and DO6, off unless asked for, and
+  // never touch the light or the sounder.
+  {
+    OutputGovernor g;
+    g.begin(0);
+    OutputState s = g.refresh(L_OFF, false, 10);
+    EXPECT(!s.readerBeep && !s.readerLed, "reader feedback off by default");
+    s.readerBeep = true;
+    EXPECT(s.bits() == (1u << 4), "reader beep is DO5");
+    s.readerBeep = false;
+    s.readerLed = true;
+    EXPECT(s.bits() == (1u << 5), "reader LED is DO6");
+    OutputState sound = {false, false, false, true, false, false};
+    EXPECT(sound.bits() == (1u << 3), "the sounder alone leaves DO5/DO6 off");
+  }
+  // The reader's beeper answers after its own beep, by count: accepted 2,
+  // person 3, refused one long, and silence for anything else.
+  {
+    struct Want {
+      uint8_t beep;
+      int starts;
+      uint32_t onMs;
+    };
+    const Want wants[] = {{1, 2, 200}, {2, 3, 300}, {3, 1, 500}, {0, 0, 0}};
+    for (const Want& w : wants) {
+      int starts = 0;
+      uint32_t onMs = 0;
+      bool was = false;
+      for (uint32_t t = 0; t < READER_BEEP_END_MS + 200; t++) {
+        bool on = readerBeepOn(w.beep, t);
+        if (on && !was) starts++;
+        if (on) onMs++;
+        if (on && t < READER_BEEP_DELAY_MS) starts = 99;  // never over the reader's own beep
+        was = on;
+      }
+      EXPECT(starts == w.starts, "reader beep count");
+      EXPECT(onMs == w.onMs, "reader beep length");
+    }
+  }
   // A governor restarted (reboot, watchdog reset) starts dark, whatever the
   // previous one was doing.
   {
