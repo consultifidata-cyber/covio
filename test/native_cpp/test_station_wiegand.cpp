@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "wiegand.h"
+#include "wiegand_bench_edges.h"
 
 using namespace station;
 
@@ -187,6 +188,102 @@ int main() {
     EXPECT(!c.take(end + 1000UL, out, &got), "no early frame across the wrap");
     EXPECT(c.take(end + WIEGAND_FRAME_GAP_US, out, &got) && got == 26, "the frame across the wrap");
     EXPECT(decode(out, got, uid) == WG_OK && strcmp(uid, "0013614E") == 0, "decodes");
+  }
+
+  // ── pulses, edge by edge (WiegandLines) ────────────────────────────────
+  struct Capture {
+    const BenchEdge* edges;
+    size_t count;
+    int minGood;
+  };
+  const Capture captures[] = {
+      {BENCH_EDGES_20261013, sizeof(BENCH_EDGES_20261013) / sizeof(BenchEdge), 5},
+      {BENCH_EDGES_20261014_TEN_TAPS, sizeof(BENCH_EDGES_20261014_TEN_TAPS) / sizeof(BenchEdge), 9},
+  };
+  for (const Capture& cap : captures) {
+    // The bench captures replayed: every card read is THE card, and noise or
+    // a cut-short frame never becomes one.
+    WiegandLines l;
+    l.setIdle(0, 0);
+    l.setIdle(1, 0);
+    uint8_t out[WIEGAND_MAX_BITS + 1];
+    uint8_t got = 0;
+    int good = 0, other = 0;
+    const BenchEdge* edges = cap.edges;
+    const size_t count = cap.count;
+    for (size_t i = 0; i < count; i++) {
+      const BenchEdge& e = edges[i];
+      if (l.collector.take(e.us, out, &got)) {
+        if (decode(out, got, uid) == WG_OK) {
+          if (strcmp(uid, "00668C8D") == 0) good++;
+          else other++;
+        }
+      }
+      l.edge(e.line, e.level, e.us);
+    }
+    uint32_t end = edges[count - 1].us + WIEGAND_FRAME_GAP_US;
+    if (l.collector.take(end, out, &got) && decode(out, got, uid) == WG_OK) {
+      if (strcmp(uid, "00668C8D") == 0) good++;
+      else other++;
+    }
+    printf("bench replay: %d reads of 00668C8D, %d other, glitches %lu, strays %lu\n", good,
+           other, (unsigned long)l.collector.glitches(), (unsigned long)l.strays());
+    EXPECT(good >= cap.minGood, "every clean tap on the bench reads as the card");
+    EXPECT(other == 0, "noise on the bench never reads as a card");
+  }
+
+  {
+    // A clean frame with a noise spike inside every gap still reads.
+    WiegandLines l;
+    l.setIdle(0, 0);
+    l.setIdle(1, 0);
+    n = frame(0x668C8DUL, 24, bits);
+    uint32_t t = 100000UL;
+    for (uint8_t i = 0; i < n; i++) {
+      l.edge(bits[i], 1, t);
+      l.edge(bits[i], 0, t + 375);  // the bit: a 375 us pulse
+      l.edge((uint8_t)(1 - bits[i]), 1, t + 900);
+      l.edge((uint8_t)(1 - bits[i]), 0, t + 903);  // a 3 us spike on the other line
+      t += 1556;
+    }
+    uint8_t out[WIEGAND_MAX_BITS + 1];
+    uint8_t got = 0;
+    EXPECT(l.collector.take(t + WIEGAND_FRAME_GAP_US, out, &got) && got == 26,
+           "spikes between bits are not bits");
+    EXPECT(decode(out, got, uid) == WG_OK && strcmp(uid, "00668C8D") == 0, "the card reads");
+    EXPECT(l.collector.glitches() == 26, "each spike is counted");
+  }
+
+  {
+    // The other polarity: a line that idles HIGH and pulses LOW (a reader on a
+    // plain logic input) reads the same once its idle level is known.
+    WiegandLines l;
+    l.setIdle(0, 1);
+    l.setIdle(1, 1);
+    n = frame(0x13614EUL, 24, bits);
+    uint32_t t = 5000UL;
+    for (uint8_t i = 0; i < n; i++) {
+      l.edge(bits[i], 0, t);
+      l.edge(bits[i], 1, t + 80);
+      t += 2000;
+    }
+    uint8_t out[WIEGAND_MAX_BITS + 1];
+    uint8_t got = 0;
+    EXPECT(l.collector.take(t + WIEGAND_FRAME_GAP_US, out, &got) && got == 26, "low pulses");
+    EXPECT(decode(out, got, uid) == WG_OK && strcmp(uid, "0013614E") == 0, "read the same");
+  }
+
+  {
+    // A line held away from idle (a wire touched, a reader stuck) is not a bit,
+    // and quiet() waits for it to come back before idle is re-learned.
+    WiegandLines l;
+    l.setIdle(0, 0);
+    l.setIdle(1, 0);
+    l.edge(0, 1, 1000);
+    EXPECT(!l.quiet(1000 + 10 * WIEGAND_FRAME_GAP_US), "not quiet while a line is held");
+    l.edge(0, 0, 1000 + 5000);
+    EXPECT(l.collector.glitches() == 1, "a 5 ms pulse is not a bit");
+    EXPECT(l.quiet(6000 + WIEGAND_FRAME_GAP_US), "quiet once it has come back");
   }
 
   // ── the bench readout ──────────────────────────────────────────────────

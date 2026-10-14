@@ -6,13 +6,19 @@
 //
 //   GREEN  (D0) -> DI2 terminal (GPIO5)      RED   -> +12 V
 //   WHITE  (D1) -> DI3 terminal (GPIO6)      BLACK -> 0 V (shared with the board)
-//   DI COM      -> +12 V                     BLUE, YELLOW, GRAY -> not connected
+//   DI COM      -> 0 V  (NOT +12 V)          BLUE, YELLOW, GRAY -> not connected
+//   DI GND      -> 0 V
 //
-// Wiegand: both lines idle; a 0 bit is a ~50-100 us pulse on D0, a 1 bit the
-// same on D1, about 1-2 ms apart, most significant bit first. A frame ends
-// when the lines have been quiet for WIEGAND_FRAME_GAP_US. The board's
-// optocoupler inverts (an active input reads LOW), so each pulse gives the
-// GPIO exactly one falling edge -- that edge is the bit.
+// Why COM on 0 V (bench, 13 Oct 2026): the reader holds D0/D1 at ~5 V when
+// idle and pulls them to 0 V for a bit. With COM on +12 V the input sat ON at
+// 12-5 V and a bit only made it "more on" -- the board saw nothing. With COM
+// on 0 V the reader's own 5 V lights the input at idle and every bit switches
+// it OFF: a clean pulse, measured 315-432 us wide every ~1.56 ms.
+//
+// Wiegand: a 0 bit is a pulse on D0, a 1 bit a pulse on D1, most significant
+// bit first. A frame ends when the lines have been quiet for
+// WIEGAND_FRAME_GAP_US. A bit is a whole PULSE, measured edge to edge
+// (WiegandLines): too short is noise, too long is a held line; neither is a bit.
 //
 // Two formats are accepted, the ones the reader's GRAY wire selects:
 //   26 bits: E + 24 data + O   (even parity over bits 0-12, odd over 13-25)
@@ -41,6 +47,16 @@
 
 #ifndef WIEGAND_FRAME_GAP_US
 #define WIEGAND_FRAME_GAP_US 25000UL  // quiet for this long = the frame is over
+#endif
+// A bit is a PULSE: the line leaves its idle level and comes back. Measured on
+// the Waveshare 8DI-8DO's isolated inputs with a 125 kHz reader (13 Oct 2026):
+// every real bit 315-432 us wide, one every ~1.56 ms; electrical noise came as
+// bursts of 2-34 us spikes. Anything outside this window is not a bit.
+#ifndef WIEGAND_MIN_PULSE_US
+#define WIEGAND_MIN_PULSE_US 40UL
+#endif
+#ifndef WIEGAND_MAX_PULSE_US
+#define WIEGAND_MAX_PULSE_US 2000UL
 #endif
 #ifndef WIEGAND_MIN_BIT_GAP_US
 // An edge closer than this to the previous bit is the optocoupler's edge
@@ -105,6 +121,17 @@ class WiegandCollector {
     }
   }
 
+  // One whole pulse on D0 or D1, `widthUs` long, ending at `endUs`. A pulse
+  // too short (a noise spike) or too long (a wire touched, a line stuck) is
+  // counted as a glitch and is not a bit.
+  __attribute__((always_inline)) void addPulse(uint8_t b, uint32_t widthUs, uint32_t endUs) {
+    if (widthUs < WIEGAND_MIN_PULSE_US || widthUs > WIEGAND_MAX_PULSE_US) {
+      glitches_++;
+      return;
+    }
+    addBit(b, endUs);
+  }
+
   // A finished frame, if the line has been quiet for the frame gap. A frame
   // that overflowed comes back with n = WIEGAND_MAX_BITS + 1 so the decoder
   // refuses it by length.
@@ -126,6 +153,56 @@ class WiegandCollector {
   bool overflow_ = false;
   uint32_t lastUs_ = 0;
   uint32_t glitches_ = 0;
+};
+
+// The two reader lines, edge by edge: turns level changes into pulses and
+// pulses into bits. A line's IDLE level is learned while it is quiet, so the
+// same code reads a reader whose bits arrive as high pulses (the 8DI-8DO's
+// inputs with COM on 0 V) or as low pulses (a plain open-collector line).
+// Plain C++: the board feeds it from the interrupt, the host test replays
+// edges recorded on the bench.
+class WiegandLines {
+ public:
+  void setIdle(uint8_t b, uint8_t level) {
+    idle_[b] = level;
+    inPulse_[b] = false;
+  }
+
+  // One edge: line `b` is now at `level`, at `us`.
+  __attribute__((always_inline)) void edge(uint8_t b, uint8_t level, uint32_t us) {
+    lastEdgeUs_ = us;
+    anyEdge_ = true;
+    if (level != idle_[b]) {
+      // Leaving idle: a pulse starts (or restarts, if a spike hid its end).
+      inPulse_[b] = true;
+      startUs_[b] = us;
+    } else if (inPulse_[b]) {
+      inPulse_[b] = false;
+      collector.addPulse(b, us - startUs_[b], us);
+    } else {
+      strays_++;  // back to idle with no pulse open: half a spike
+    }
+  }
+
+  // True when neither line has moved for a frame gap: the idle level may be
+  // re-learned now.
+  bool quiet(uint32_t nowUs) const {
+    return !inPulse_[0] && !inPulse_[1] &&
+           (!anyEdge_ || (uint32_t)(nowUs - lastEdgeUs_) >= WIEGAND_FRAME_GAP_US);
+  }
+
+  uint32_t strays() const { return strays_; }
+  uint8_t idle(uint8_t b) const { return idle_[b]; }
+
+  WiegandCollector collector;
+
+ private:
+  uint8_t idle_[2] = {1, 1};
+  bool inPulse_[2] = {false, false};
+  uint32_t startUs_[2] = {0, 0};
+  uint32_t lastEdgeUs_ = 0;
+  bool anyEdge_ = false;
+  uint32_t strays_ = 0;
 };
 
 // What `station wiegand` prints: enough to prove on the bench that the
@@ -163,13 +240,30 @@ struct WiegandStats {
 
 #ifdef ARDUINO
 #include <Arduino.h>
+#include <soc/gpio_reg.h>
+
+#ifndef WIEGAND_EDGE_LOG
+#define WIEGAND_EDGE_LOG 512  // edges kept for `station wiegand raw` (8 bytes each)
+#endif
 
 namespace station {
 
+// One edge on a reader line, for the bench: when, which line, which level.
+struct WiegandEdge {
+  uint32_t us;
+  uint8_t line;   // 0 = D0 (GREEN), 1 = D1 (WHITE)
+  uint8_t level;  // the GPIO level just after the edge
+};
+
 // What the interrupt touches, and nothing else.
 struct WiegandIsrState {
-  WiegandCollector collector;
+  WiegandLines lines;
   portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
+  uint8_t pin[2] = {0, 0};
+  WiegandEdge edges[WIEGAND_EDGE_LOG];
+  uint16_t edgeHead = 0;   // next slot
+  uint16_t edgeCount = 0;  // kept, up to WIEGAND_EDGE_LOG
+  uint32_t edgeLost = 0;   // overwritten before they were printed
 };
 
 // The interrupt handlers live in IRAM: the board writes flash (the queue, the
@@ -179,10 +273,26 @@ struct WiegandIsrState {
 // placed after use"). micros() and the critical section are IRAM-safe, and
 // addBit() is forced inline. This header is included by covio_firmware.ino
 // only, so `static` gives one copy.
+//
+// The interrupt fires on BOTH edges: WiegandLines needs a pulse's start and
+// end to measure it, and the bench log (`station wiegand raw`) shows both. The
+// level is read straight from the GPIO input register (IRAM-safe; GPIO5/6 are
+// below 32).
 static void IRAM_ATTR wiegandEdge(WiegandIsrState* s, uint8_t b) {
   uint32_t us = micros();
+  uint8_t level = (uint8_t)((REG_READ(GPIO_IN_REG) >> s->pin[b]) & 1u);
   portENTER_CRITICAL_ISR(&s->mux);
-  s->collector.addBit(b, us);
+  WiegandEdge& e = s->edges[s->edgeHead];
+  e.us = us;
+  e.line = b;
+  e.level = level;
+  s->edgeHead = (uint16_t)((s->edgeHead + 1) % WIEGAND_EDGE_LOG);
+  if (s->edgeCount < WIEGAND_EDGE_LOG) {
+    s->edgeCount++;
+  } else {
+    s->edgeLost++;
+  }
+  s->lines.edge(b, level, us);
   portEXIT_CRITICAL_ISR(&s->mux);
 }
 static void IRAM_ATTR wiegandOnD0(void* s) { wiegandEdge(static_cast<WiegandIsrState*>(s), 0); }
@@ -193,10 +303,14 @@ class WiegandCardReader : public CardReader {
   bool begin(int pinD0, int pinD1) {
     pinD0_ = pinD0;
     pinD1_ = pinD1;
+    isr_.pin[0] = (uint8_t)pinD0;
+    isr_.pin[1] = (uint8_t)pinD1;
     pinMode(pinD0, INPUT_PULLUP);
     pinMode(pinD1, INPUT_PULLUP);
-    attachInterruptArg(digitalPinToInterrupt(pinD0), wiegandOnD0, &isr_, FALLING);
-    attachInterruptArg(digitalPinToInterrupt(pinD1), wiegandOnD1, &isr_, FALLING);
+    isr_.lines.setIdle(0, (uint8_t)digitalRead(pinD0));
+    isr_.lines.setIdle(1, (uint8_t)digitalRead(pinD1));
+    attachInterruptArg(digitalPinToInterrupt(pinD0), wiegandOnD0, &isr_, CHANGE);
+    attachInterruptArg(digitalPinToInterrupt(pinD1), wiegandOnD1, &isr_, CHANGE);
     started_ = true;
     return true;
   }
@@ -206,8 +320,18 @@ class WiegandCardReader : public CardReader {
   bool poll(char* uid) override {
     uint8_t bits[WIEGAND_MAX_BITS + 1];
     uint8_t n = 0;
+    uint32_t now = micros();
+    // Read the levels outside the lock; use them only if nothing moved since.
+    uint8_t g = (uint8_t)digitalRead(pinD0_);
+    uint8_t w = (uint8_t)digitalRead(pinD1_);
     portENTER_CRITICAL(&isr_.mux);
-    bool have = isr_.collector.take(micros(), bits, &n);
+    bool have = isr_.lines.collector.take(now, bits, &n);
+    if (!have && isr_.lines.quiet(now)) {
+      // Quiet for a frame gap: whatever level the lines sit at is idle. This
+      // follows a rewiring (COM moved) without a reboot.
+      isr_.lines.setIdle(0, g);
+      isr_.lines.setIdle(1, w);
+    }
     portEXIT_CRITICAL(&isr_.mux);
     if (!have) return false;
     char decoded[17] = {0};
@@ -223,19 +347,53 @@ class WiegandCardReader : public CardReader {
 
   void printStats(Print& out) {
     portENTER_CRITICAL(&isr_.mux);
-    uint32_t glitches = isr_.collector.glitches();
+    uint32_t glitches = isr_.lines.collector.glitches();
+    uint32_t strays = isr_.lines.strays();
+    uint8_t idleG = isr_.lines.idle(0), idleW = isr_.lines.idle(1);
     portEXIT_CRITICAL(&isr_.mux);
-    out.printf("wiegand: D0=GPIO%d D1=GPIO%d frames=%lu ok=%lu bad_length=%lu bad_parity=%lu "
-               "glitches=%lu\n",
-               pinD0_, pinD1_, (unsigned long)stats_.frames, (unsigned long)stats_.ok,
-               (unsigned long)stats_.badLength, (unsigned long)stats_.badParity,
-               (unsigned long)glitches);
+    out.printf("wiegand: D0=GPIO%d D1=GPIO%d idle=G%uW%u frames=%lu ok=%lu bad_length=%lu "
+               "bad_parity=%lu glitches=%lu strays=%lu\n",
+               pinD0_, pinD1_, (unsigned)idleG, (unsigned)idleW, (unsigned long)stats_.frames,
+               (unsigned long)stats_.ok, (unsigned long)stats_.badLength,
+               (unsigned long)stats_.badParity, (unsigned long)glitches, (unsigned long)strays);
     if (stats_.frames == 0) {
       out.println("wiegand: no frame yet -- tap a card");
       return;
     }
     out.printf("wiegand: last %u bits %s -> %s %s\n", (unsigned)stats_.lastN, stats_.lastBits,
                wiegandResultName(stats_.lastResult), stats_.lastUid);
+  }
+
+  // `station wiegand raw`: every edge since the last print, oldest first, as
+  // "+<µs since the previous edge> <G|W><level>", then forgets them. A gap over
+  // 25 ms starts a new line, so each tap's frame prints on its own lines.
+  void printRaw(Print& out) {
+    static WiegandEdge copy[WIEGAND_EDGE_LOG];
+    portENTER_CRITICAL(&isr_.mux);
+    uint16_t n = isr_.edgeCount;
+    uint16_t start = (uint16_t)((isr_.edgeHead + WIEGAND_EDGE_LOG - n) % WIEGAND_EDGE_LOG);
+    for (uint16_t i = 0; i < n; i++) copy[i] = isr_.edges[(start + i) % WIEGAND_EDGE_LOG];
+    uint32_t lost = isr_.edgeLost;
+    isr_.edgeCount = 0;
+    isr_.edgeLost = 0;
+    portEXIT_CRITICAL(&isr_.mux);
+    out.printf("wiegand raw: %u edges (lost %lu); idle levels now G%d W%d\n", (unsigned)n,
+               (unsigned long)lost, digitalRead(pinD0_), digitalRead(pinD1_));
+    uint8_t onLine = 0;
+    for (uint16_t i = 0; i < n; i++) {
+      uint32_t gap = i ? copy[i].us - copy[i - 1].us : 0;
+      if (i == 0 || gap > WIEGAND_FRAME_GAP_US) {
+        out.printf("%sframe:", i ? "\n" : "");
+        onLine = 0;
+      } else if (onLine == 12) {
+        out.print("\n      ");
+        onLine = 0;
+      }
+      out.printf(" +%lu %c%u", (unsigned long)gap, copy[i].line ? 'W' : 'G',
+                 (unsigned)copy[i].level);
+      onLine++;
+    }
+    out.println();
   }
 
  private:

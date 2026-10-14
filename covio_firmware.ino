@@ -99,8 +99,12 @@ static bool stationConsole(const String& line) {
     stationWiegand.printStats(Serial);
     return true;
   }
+  if (line == "station wiegand raw") {
+    stationWiegand.printRaw(Serial);
+    return true;
+  }
   if (line == "station help") {
-    Serial.println("station | station tap <uid> | station test | station wiegand");
+    Serial.println("station | station tap <uid> | station test | station wiegand [raw]");
     return true;
   }
 #else
