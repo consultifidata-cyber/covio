@@ -33,13 +33,15 @@ int main() {
     OutputState b = g.refresh(L_RED_BLINK, false, 1500);
     EXPECT(a.red != b.red, "red blinks");
     EXPECT(!a.green && !a.amber, "red blink lights nothing else");
+    // D-292: steady red stays on; the logic's pattern switches it.
+    EXPECT(g.refresh(L_RED, false, 2000).red && g.refresh(L_RED, false, 2500).red, "red steady");
   }
-  // A logic that asks for sound for ever gets 10 s, then a rest.
+  // A logic that asks for sound for ever gets 600 s, then a rest (D-292).
   {
     OutputGovernor g;
     g.begin(0);
     uint32_t onMs = 0, longest = 0, run = 0;
-    for (uint32_t t = 0; t <= 30000; t += 50) {
+    for (uint32_t t = 0; t <= 700000; t += 50) {
       OutputState s = g.refresh(L_RED_BLINK, true, t);
       if (s.sounder) {
         onMs += 50;
@@ -49,20 +51,41 @@ int main() {
         run = 0;
       }
     }
-    EXPECT(longest <= CAP_BURST_S * 1000UL, "no stretch longer than 10 s");
+    EXPECT(longest <= SOUNDER_MAX_ON_S * 1000UL, "no stretch longer than 600 s");
+    EXPECT(longest >= 599000UL, "the logic's whole per-stop ceiling fits in one stretch");
     EXPECT(g.faultLatched(), "the cut is reported");
     EXPECT(onMs > 0, "it did sound");
   }
-  // And never more than 60 s in a ten-minute window, however the bursts are arranged.
+  // And never more than 1,200 s in a thirty-minute window, however the bursts are arranged.
   {
     OutputGovernor g;
     g.begin(0);
     uint32_t onMs = 0;
-    for (uint32_t t = 0; t < 10UL * 60UL * 1000UL; t += 50) {
-      bool want = (t % 5000) < 4000;  // 4 s on, 1 s off, all ten minutes
-      if (g.refresh(L_RED_BLINK, want, t).sounder) onMs += 50;
+    for (uint32_t t = 0; t < SOUNDER_WINDOW_MS; t += 50) {
+      bool want = (t % 5000) < 4000;  // 4 s on, 1 s off, all thirty minutes
+      if (g.refresh(L_RED, want, t).sounder) onMs += 50;
     }
-    EXPECT(onMs <= 60000UL + 50, "at most 60 s of sound in a ten-minute window");
+    EXPECT(onMs <= SOUNDER_WINDOW_MAX_S * 1000UL + 50, "at most 1,200 s in a 30-minute window");
+    EXPECT(onMs >= SOUNDER_WINDOW_MAX_S * 1000UL - 1000, "and the window's budget is usable");
+  }
+  // D-292: the patterns the owner asked for pass the governor whole -- 15 s on
+  // / 15 s off, and the tightest one, 1 s on / 2 s -- ticked once a second.
+  {
+    const uint32_t shapes[2][2] = {{15, 30}, {1, 2}};
+    for (int k = 0; k < 2; k++) {
+      OutputGovernor g;
+      g.begin(0);
+      uint32_t asked = 0, got = 0;
+      for (uint32_t t = 0; t < 300000; t += 50) {
+        uint32_t sec = t / 1000;
+        bool want = (sec % shapes[k][1]) < shapes[k][0];
+        bool on = g.refresh(L_RED, want, t).sounder;
+        if (want) asked += 50;
+        if (on) got += 50;
+      }
+      EXPECT(got == asked, "a pattern's sound is not cut by the governor");
+      EXPECT(!g.faultLatched(), "and no fault is latched");
+    }
   }
   // A task that stops refreshing: everything off within the heartbeat.
   {

@@ -44,6 +44,7 @@ static const char* const CONFIG_ERRORS[] = {
     "missing:VER", "missing:MODE", "missing:T", "missing:TS", "missing:SPOOL", "missing:C",
     "missing:R", "missing:N", "missing:Q", "missing:RECOVER", "missing:CORRECT", "missing:TZ",
     "range:GAP",  // D-285; appended, so every older code keeps its number
+    "pattern",    "cap:P",  // D-292; appended likewise
 };
 static const int CONFIG_ERROR_COUNT = sizeof(CONFIG_ERRORS) / sizeof(CONFIG_ERRORS[0]);
 
