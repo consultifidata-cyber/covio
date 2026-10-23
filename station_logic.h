@@ -78,6 +78,8 @@ static const uint32_t ANNOUNCEMENT_S = 4;
 static const int64_t SIREN_CEILING_S = 600;
 static const int64_t SIREN_CEILING_READER_DOWN_S = 60;
 static const int MAX_PATTERNS = 4;
+// D-292: a fast pattern would queue a row per burst; the first few say enough.
+static const int64_t MAX_SOUND_EVENTS = 5;
 
 static const int MAX_CARDS = 1024;
 static const int MAX_WINDOWS = 6;
@@ -820,15 +822,21 @@ class StationLogic {
     // G5: with quiet windows configured, sound needs a synced clock.
     bool gate = live && c.mode == 2 && !in.inputSuspect && !(c.windowCount > 0 && !in.hasWall);
     bool sounding = false;
-    if (gate && sirenOn && !exhausted_ && soundSeconds_ < ceiling) {
-      sounding = true;
-      if (!sirenWasOn_) {
-        sounds_ += 1;
-        Event& e = push(out, EV_SOUND_PLAYED);
-        e.hasN = true;
-        e.n = sounds_;
+    if (gate && sirenOn && !exhausted_) {
+      // The reader can go down after more than its ceiling of sound: the siren
+      // is spent at once, and says so.
+      if (soundSeconds_ < ceiling) {
+        sounding = true;
+        if (!sirenWasOn_) {
+          sounds_ += 1;
+          if (sounds_ <= MAX_SOUND_EVENTS) {
+            Event& e = push(out, EV_SOUND_PLAYED);
+            e.hasN = true;
+            e.n = sounds_;
+          }
+        }
+        soundSeconds_ += 1;
       }
-      soundSeconds_ += 1;
       if (soundSeconds_ >= ceiling) {
         exhausted_ = true;
         Event& x = push(out, EV_ANNOUNCEMENTS_EXHAUSTED);
