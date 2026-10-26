@@ -207,6 +207,10 @@
 // pulse COUNTING: each physical pulse still yields exactly one rising edge.
 #define PIN_PULSE             4           // DI1 terminal (GPIO4) -> NPN flow pulses (onboard opto)
 #define PIN_CT_STATE          5           // DI2 terminal (GPIO5); active = LOW (opto inverts)
+// Machine Station card reader, 125 kHz Wiegand (wiegand.h). DI2 is also the CT
+// input, so a CT build cannot carry the reader (checked below).
+#define PIN_WIEGAND_D0        5           // DI2 terminal (GPIO5) <- reader GREEN (D0)
+#define PIN_WIEGAND_D1        6           // DI3 terminal (GPIO6) <- reader WHITE (D1)
 
 #else
 #error "Unknown BOARD_MODE -- valid values: BOARD_RELAY1CH (0, default), BOARD_8DI8DO (1)."
@@ -247,6 +251,22 @@
 #define SENSOR_MODE_CT        1
 #ifndef SENSOR_MODE
 #define SENSOR_MODE           SENSOR_MODE_NPN
+#endif
+
+// Machine Station's 125 kHz Wiegand reader (wiegand.h) on DI2/DI3. Station
+// environments turn it on (platformio.ini); it needs the 8DI-8DO's inputs, and
+// DI2 is the CT input, so a CT build cannot carry it.
+#ifndef STATION_READER_WIEGAND
+#define STATION_READER_WIEGAND 0
+#endif
+#if STATION_READER_WIEGAND && !STATION_ENABLE
+#error "STATION_READER_WIEGAND needs STATION_ENABLE=1."
+#endif
+#if STATION_READER_WIEGAND && BOARD_MODE != BOARD_8DI8DO
+#error "STATION_READER_WIEGAND needs BOARD_MODE=1 (8DI-8DO): the reader lands on DI2/DI3."
+#endif
+#if STATION_READER_WIEGAND && SENSOR_MODE == SENSOR_MODE_CT
+#error "STATION_READER_WIEGAND and SENSOR_MODE_CT both use DI2 (GPIO5)."
 #endif
 #define CT_PULSE_HZ           1           // synthesized pulses/sec while current present
 #define CT_DEBOUNCE_MS        100         // DI2 level debounce (on top of the board's own DI filtering)

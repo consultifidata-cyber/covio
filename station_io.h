@@ -7,10 +7,10 @@
 // it is asked -- a second, independent fence behind station_logic.h's caps:
 //
 //   * all outputs off until the first refresh, and off at begin();
-//   * the sounder never on for more than CAP_BURST_S (10 s) at a stretch, then
-//     off for at least SOUNDER_REST_MS before it may sound again;
-//   * never more than SOUNDER_WINDOW_MAX_S (60 s) of sound in each ten-minute
-//     window (fixed windows counted from begin(), not a rolling ten minutes);
+//   * the sounder never on for more than SOUNDER_MAX_ON_S (600 s) at a
+//     stretch, then off for at least SOUNDER_REST_MS before it may sound again;
+//   * never more than SOUNDER_WINDOW_MAX_S (1,200 s) of sound in each
+//     thirty-minute window (fixed windows counted from begin(), not rolling);
 //   * if the station task stops refreshing for HEARTBEAT_MS, everything goes
 //     off -- the loop calls failsafe() every pass, so a hung task cannot leave
 //     a hooter on (Part 2 §V rule 4; the product success test's last line).
@@ -48,20 +48,65 @@
 
 namespace station {
 
-static const uint32_t SOUNDER_REST_MS = 1000;
-static const uint32_t SOUNDER_WINDOW_MS = 10UL * 60UL * 1000UL;
-static const uint32_t SOUNDER_WINDOW_MAX_S = 60;
+// D-292 (covio): the logic may now ask for the siren continuously until a card
+// is tapped, bounded by SIREN_CEILING_S (600 s) of sound per stop. The
+// governor stays an independent fence behind it, sized so that the logic's
+// own behaviour always fits and a logic gone wrong still cannot sound for ever:
+//   * one stretch at most 600 s: the logic's whole per-stop ceiling, at once;
+//   * at most 1,200 s in a fixed 30-minute window: two full stops' ceilings
+//     back to back (a stop, a short run, a second stop) fit; a stuck "on" is
+//     cut to 40% of the time and latches the fault;
+//   * rest 500 ms after a stretch: the shortest off a pattern asks for is one
+//     second (1 s on / 2 s), and a rest as long as that second would let tick
+//     jitter swallow a burst.
+static const uint32_t SOUNDER_MAX_ON_S = 600;
+static const uint32_t SOUNDER_REST_MS = 500;
+static const uint32_t SOUNDER_WINDOW_MS = 30UL * 60UL * 1000UL;
+static const uint32_t SOUNDER_WINDOW_MAX_S = 1200;
 static const uint32_t HEARTBEAT_MS = 3000;
 static const uint32_t BLINK_HALF_MS = 500;
 
+// The reader's own BEEP (YELLOW) and LED (BLUE) control wires: the board pulls
+// them to 0 V only for a card IT decoded, so the loud reader beeper and its
+// green LED become the board's confirmation (bench, 14 Oct 2026: the reader's
+// beeper drowned the onboard one). DO5 and DO6 were spare.
+#ifndef STATION_CH_READER_BEEP
+#define STATION_CH_READER_BEEP 4  // DO5 <- reader YELLOW
+#endif
+#ifndef STATION_CH_READER_LED
+#define STATION_CH_READER_LED 5  // DO6 <- reader BLUE
+#endif
+
+// The reader ALWAYS gives its own short beep and green flash on any read
+// (bench, 14 Oct 2026; not switchable from its wires), so the board's answer
+// on the reader's beeper waits READER_BEEP_DELAY_MS and is counted, never one
+// short beep: accepted = 2 short, person = 3 short, refused = 1 long. Nothing
+// extra means the board did not get the card -- tap again.
+static const uint32_t READER_BEEP_DELAY_MS = 250;
+static const uint32_t READER_BEEP_END_MS = READER_BEEP_DELAY_MS + 600;
+
+// `beep`: 1 accepted, 2 person, 3 refused (station_logic.h's Beep); `t` ms
+// since the tap's feedback began.
+inline bool readerBeepOn(uint8_t beep, uint32_t t) {
+  if (t < READER_BEEP_DELAY_MS) return false;
+  t -= READER_BEEP_DELAY_MS;
+  if (beep == 3) return t < 500;
+  uint32_t shorts = beep == 1 ? 2 : beep == 2 ? 3 : 0;
+  return t / 200 < shorts && t % 200 < 100;
+}
+
+// Aggregate on purpose: `{red, amber, green, sounder}` leaves the reader
+// feedback off, so every fail-safe and governor path stays as it was.
 struct OutputState {
-  bool red, amber, green, sounder;
+  bool red, amber, green, sounder, readerBeep, readerLed;
   uint8_t bits() const {
     uint8_t b = 0;
     if (red) b |= (uint8_t)(1u << STATION_CH_RED);
     if (amber) b |= (uint8_t)(1u << STATION_CH_AMBER);
     if (green) b |= (uint8_t)(1u << STATION_CH_GREEN);
     if (sounder) b |= (uint8_t)(1u << STATION_CH_SOUNDER);
+    if (readerBeep) b |= (uint8_t)(1u << STATION_CH_READER_BEEP);
+    if (readerLed) b |= (uint8_t)(1u << STATION_CH_READER_LED);
     return b;
   }
 };
@@ -98,7 +143,7 @@ class OutputGovernor {
 
  private:
   OutputState compute(uint32_t nowMs) {
-    OutputState s = {false, false, false, false};
+    OutputState s = {false, false, false, false, false, false};
     accountSound(nowMs);
     if (!started_ || nowMs - lastRefreshMs_ > HEARTBEAT_MS) {
       setSounder(false, nowMs);
@@ -115,6 +160,9 @@ class OutputGovernor {
       case L_RED_BLINK:
         s.red = phase;
         break;
+      case L_RED:  // D-292: steady; the logic's pattern does the switching
+        s.red = true;
+        break;
       case L_AMBER_BLINK:
         s.amber = phase;
         break;
@@ -122,7 +170,7 @@ class OutputGovernor {
         break;
     }
     bool allowed = wantSound_;
-    if (allowed && sounderOn_ && nowMs - sounderSinceMs_ >= CAP_BURST_S * 1000UL) {
+    if (allowed && sounderOn_ && nowMs - sounderSinceMs_ >= SOUNDER_MAX_ON_S * 1000UL) {
       allowed = false;
       faultLatched_ = true;
     }
