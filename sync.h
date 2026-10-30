@@ -31,6 +31,7 @@
 #include "queue.h"
 #include "telemetry.h"
 #include "certs.h"
+#include "relocate_url.h"   // D-315
 #include "timestamp_parse.h"   // overflow-safe int64 parsing (server_time_ms remediation)
 #include "ack_validation.h"    // Miki Wire hardening (F8): ack_seq bounding
 #include "checked_field_parse.h"   // overflow-safe uint32 parsing (ack_seq / K-factor version)
@@ -293,6 +294,15 @@ public:
         }
         if (countListener_) countListener_(want);
       }
+      // D-315 · covio.in may name this board's new home. Only
+      // https://covio.in/fleet/<slug> is accepted (relocate_url.h); the next
+      // push goes there with the same key and the same queue.
+      String moveTo = extractStr_(r, "server_url");
+      if (moveTo.length() > 0 && moveTo != st_->serverUrl() &&
+          isAllowedRelocateUrl(moveTo.c_str())) {
+        st_->setServerUrl(moveTo);
+        Serial.printf("[SYNC] relocated to %s\n", moveTo.c_str());
+      }
     }
     http.end();
   }
@@ -303,6 +313,19 @@ public:
 
 private:
   CountListener countListener_ = nullptr;
+  // "key":"value" -> value, or "" (flat, trusted server contract).
+  static String extractStr_(const String& s, const char* key) {
+    String pat = "\"" + String(key) + "\"";
+    int i = s.indexOf(pat);
+    if (i < 0) return "";
+    i = s.indexOf(':', i);
+    if (i < 0) return "";
+    i = s.indexOf('"', i);
+    if (i < 0) return "";
+    int j = s.indexOf('"', i + 1);
+    if (j < 0) return "";
+    return s.substring(i + 1, j);
+  }
   // Minimal JSON scalar extractors. Good enough for the flat, trusted
   // server contract; not a general parser.
   //
