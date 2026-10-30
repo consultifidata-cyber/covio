@@ -60,6 +60,10 @@
 // compile).
 #define NVS_KEY_MW_MAX_HZ       "mw_max_hz"
 #define NVS_KEY_MW_SUSPECT_S    "mw_suspect_s"
+// D-315 · confirmed-state cycle counting, delivered by the config poll.
+#define NVS_KEY_CNT_ON          "cnt_on"
+#define NVS_KEY_CNT_OFF         "cnt_off"
+#define NVS_KEY_CNT_GAP         "cnt_gap"
 
 // ---- "covio_sec" namespace (NVS_NS_SECURITY): survives factoryReset() ------
 #define NVS_KEY_SEC_VER         "sec_ver"
@@ -92,6 +96,9 @@ static_assert(NVS_KEY_FITS(NVS_KEY_WIFIRECON_CNT),  "NVS key too long");
 static_assert(NVS_KEY_FITS(NVS_KEY_CRASH_STREAK),   "NVS key too long");
 static_assert(NVS_KEY_FITS(NVS_KEY_MW_MAX_HZ),      "NVS key too long");
 static_assert(NVS_KEY_FITS(NVS_KEY_MW_SUSPECT_S),   "NVS key too long");
+static_assert(NVS_KEY_FITS(NVS_KEY_CNT_ON),         "NVS key too long");
+static_assert(NVS_KEY_FITS(NVS_KEY_CNT_OFF),        "NVS key too long");
+static_assert(NVS_KEY_FITS(NVS_KEY_CNT_GAP),        "NVS key too long");
 static_assert(NVS_KEY_FITS(NVS_KEY_SEC_VER),        "NVS key too long");
 static_assert(NVS_KEY_FITS(NVS_KEY_LAST_OK_VER),    "NVS key too long");
 static_assert(NVS_KEY_FITS(NVS_KEY_LAST_OK_SECVER), "NVS key too long");

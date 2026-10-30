@@ -20,6 +20,9 @@
 #include <Arduino.h>
 #include <LittleFS.h>
 #include "driver/pcnt.h"
+#include "driver/gpio.h"
+#include "esp_timer.h"
+#include "cycle_counter.h"   // D-315
 #include "config.h"
 #include "queue_offset_checkpoint.h"
 
@@ -113,12 +116,49 @@ public:
                   (unsigned long long)base_, cp_.writes);
   }
 
-  // lifetime raw pulses = persisted base + what PCNT has counted since boot
+  // lifetime total = persisted base + what was counted since boot: PCNT
+  // edges, or (D-315) confirmed cycles from the 1 ms sampler.
   uint64_t total() {
+    if (cycleMode_) return base_ + accumulated_ + (uint64_t)(counter_.counted() - cycleFolded_);
     int16_t c = 0;
     pcnt_get_counter_value(PCNT_UNIT_USED, &c);
     return base_ + accumulated_ + (uint16_t)c;
   }
+
+  // ---- D-315 · confirmed-state cycle counting --------------------------
+  // Switches counting between PCNT edges (settings all zero -- the
+  // behaviour every board had before) and confirmed cycles. Everything
+  // counted so far is folded into the base first, so the lifetime total
+  // never jumps or goes back when the rule changes. PCNT keeps counting
+  // raw edges in cycle mode: raw edges minus cycles is the flicker the
+  // rule refused, reported in the push envelope.
+  void applyCycleSettings(const CycleSettings& s) {
+    const CycleSettings& now = counter_.settings();
+    if (s.enabled() == cycleMode_ && (!cycleMode_ || (s.onStableMs == now.onStableMs &&
+        s.offStableMs == now.offStableMs && s.minGapMs == now.minGapMs))) return;
+    stopSampler_();
+    foldIntoBase_();
+    counter_ = CycleCounter();
+    counter_.configure(s);
+    cycleFolded_ = 0;
+    rawAccum_ = 0;
+    cycleMode_ = s.enabled();
+    if (cycleMode_) startSampler_();
+    Serial.printf("[TOT] counting: %s on=%ums off=%ums gap=%ums\n",
+                  cycleMode_ ? "confirmed cycles" : "pcnt edges",
+                  s.onStableMs, s.offStableMs, s.minGapMs);
+  }
+  bool cycleMode() const { return cycleMode_; }
+  /** Raw rising edges PCNT saw since cycle mode began (0 in edge mode). */
+  uint64_t rawEdges() {
+    if (!cycleMode_) return 0;
+    int16_t c = 0;
+    pcnt_get_counter_value(PCNT_UNIT_USED, &c);
+    return rawAccum_ + (uint16_t)c;
+  }
+  uint32_t cyclesCounted() const { return counter_.counted(); }
+  uint32_t sampledRises() const { return counter_.rawRises(); }
+  uint32_t cyclesTooSoon() const { return counter_.tooSoon(); }
 
   // Call periodically. PCNT is 16-bit; we drain it into a 64-bit accumulator
   // well before it can wrap. Then checkpoint the total to SD (ping-pong).
@@ -126,12 +166,11 @@ public:
     int16_t c = 0;
     pcnt_get_counter_value(PCNT_UNIT_USED, &c);
     if ((uint16_t)c >= 30000) {          // drain before 16-bit wrap
-      accumulated_ += (uint16_t)c;
+      if (cycleMode_) rawAccum_ += (uint16_t)c;   // D-315: diagnostics only
+      else accumulated_ += (uint16_t)c;
       pcnt_counter_clear(PCNT_UNIT_USED);
     }
-    cp_.total  = base_ + accumulated_;
-    int16_t c2 = 0; pcnt_get_counter_value(PCNT_UNIT_USED, &c2);
-    cp_.total += (uint16_t)c2;
+    cp_.total  = total();
     cp_.seq    = seq;
     persist_();
   }
@@ -160,6 +199,44 @@ public:
   uint32_t queueOffsetOffset()  const { return cp_.q_offset; }
 
 private:
+  // Everything counted so far becomes base, in whichever mode is running.
+  void foldIntoBase_() {
+    if (cycleMode_) {
+      uint32_t n = counter_.counted();
+      base_ += (uint64_t)(n - cycleFolded_);
+      cycleFolded_ = n;
+    } else {
+      int16_t c = 0;
+      pcnt_get_counter_value(PCNT_UNIT_USED, &c);
+      base_ += (uint16_t)c;
+    }
+    base_ += accumulated_;
+    accumulated_ = 0;
+    pcnt_counter_clear(PCNT_UNIT_USED);
+  }
+
+  // The 1 ms sampler. esp_timer runs it from its own high-priority task;
+  // a few ms of jitter under WiFi load is harmless because every decision
+  // needs the input to HOLD for tens of milliseconds.
+  static void sampleTick_(void* arg) {
+    Totalizer* self = static_cast<Totalizer*>(arg);
+    self->counter_.sample(gpio_get_level((gpio_num_t)PIN_PULSE) != 0,
+                          (uint32_t)(esp_timer_get_time() / 1000));
+  }
+  void startSampler_() {
+    if (!sampler_) {
+      esp_timer_create_args_t args = {};
+      args.callback = &Totalizer::sampleTick_;
+      args.arg = this;
+      args.name = "cycle_sampler";
+      if (esp_timer_create(&args, &sampler_) != ESP_OK) { sampler_ = nullptr; return; }
+    }
+    esp_timer_start_periodic(sampler_, 1000);
+  }
+  void stopSampler_() {
+    if (sampler_) esp_timer_stop(sampler_);
+  }
+
   void setupPCNT_() {
     // PRODUCTION BOARD UPDATE (8DI-8DO retarget): PIN_PULSE is now the DI1
     // terminal's GPIO (see config.h's retarget note); the ONBOARD
@@ -266,4 +343,10 @@ private:
   Checkpoint cp_{};
   uint64_t base_ = 0;         // total before this boot
   uint64_t accumulated_ = 0;  // drained-out counts this boot
+  // D-315 · cycle mode.
+  bool cycleMode_ = false;
+  CycleCounter counter_;
+  uint32_t cycleFolded_ = 0;  // counter_.counted() already folded into base_
+  uint64_t rawAccum_ = 0;     // PCNT edges drained while in cycle mode
+  esp_timer_handle_t sampler_ = nullptr;
 };

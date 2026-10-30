@@ -55,6 +55,25 @@
 
 Store         store;
 Totalizer     totalizer;
+
+// D-315 · the config poll delivers a counting rule; apply it live.
+static void applyCountingRule(const CycleSettings& s) { totalizer.applyCycleSettings(s); }
+// D-315 · {"mode":"cycles","raw_edges":N,"sampled_rises":N,"cycles":N,"too_soon":N,
+//          "on_ms":N,"off_ms":N,"gap_ms":N}, or {"mode":"edges"}.
+static String countingEnvelopeJson() {
+  if (!totalizer.cycleMode()) return String("{\"mode\":\"edges\"}");
+  CycleSettings s = store.countSettings();
+  String j = "{\"mode\":\"cycles\"";
+  j += ",\"raw_edges\":" + String((unsigned long long)totalizer.rawEdges());
+  j += ",\"sampled_rises\":" + String(totalizer.sampledRises());
+  j += ",\"cycles\":" + String(totalizer.cyclesCounted());
+  j += ",\"too_soon\":" + String(totalizer.cyclesTooSoon());
+  j += ",\"on_ms\":" + String(s.onStableMs);
+  j += ",\"off_ms\":" + String(s.offStableMs);
+  j += ",\"gap_ms\":" + String(s.minGapMs);
+  j += "}";
+  return j;
+}
 EventQueue    eventQueue;
 Sync          syncEngine;
 Ota           ota;
@@ -295,6 +314,9 @@ void setup() {
 
   // 3) recover totalizer + queue state from SD
   totalizer.begin(store.bootId());
+  // D-315 · the counting rule last delivered for this machine (NVS); the
+  // config poll may change it at any time without a reboot.
+  totalizer.applyCycleSettings(store.countSettings());
   // ADR-003 (Phase 2): totalizer.begin() has already recovered the queue
   // write-offset checkpoint (q_segment/q_offset) by this point, so passing
   // &totalizer here is safe -- EventQueue::begin() reads it immediately
@@ -326,6 +348,8 @@ void setup() {
   ota.begin(&store);
   ota.noteBoot();                     // "am I a freshly-OTA'd image on trial?"
   syncEngine.begin(&store, &eventQueue);
+  syncEngine.setCountListener(applyCountingRule);
+  Telemetry::countingEnvelope() = countingEnvelopeJson;
   syncEngine.wifiConnect();
 
   // DM-Phase 2: bounded boot-time wait for the station connection just

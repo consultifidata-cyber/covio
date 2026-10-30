@@ -108,6 +108,12 @@ public:
   }
 #endif
 
+  typedef String (*CountingEnvelopeFn)();
+  static CountingEnvelopeFn& countingEnvelope() {
+    static CountingEnvelopeFn fn = nullptr;
+    return fn;
+  }
+
   static String toJson(Store& st, const QRow* rows, int n,
                        const char* otaState = nullptr,
                        const char* otaReject = nullptr) {
@@ -181,6 +187,11 @@ public:
       }
       s += ",\"security_version\":" + String(st.securityVersion());
       s += "}";
+    }
+    // D-315 · how this box is counting, and what the rule refused.
+    if (countingEnvelope()) {
+      s += ",\"counting\":";
+      s += countingEnvelope()();
     }
 #if STATION_ENABLE
     // Machine Station: the station's state, envelope-level like `ota` above

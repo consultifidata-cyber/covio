@@ -275,11 +275,34 @@ public:
         st_->setCfgVer((uint32_t)ver);
         Serial.printf("[SYNC] new calibration v%ld  K=%.4f\n", ver, k);
       }
+      // D-315 · the machine's counting rule. All three must be present and
+      // in range, or nothing changes; zeros switch back to edge counting.
+      long on = extractLong_(r, "count_on_ms");
+      long off = extractLong_(r, "count_off_ms");
+      long gap = extractLong_(r, "count_gap_ms");
+      if (on >= 0 && off >= 0 && gap >= 0 && on <= 5000 && off <= 5000 && gap <= 60000) {
+        CycleSettings want;
+        want.onStableMs = (uint16_t)on;
+        want.offStableMs = (uint16_t)off;
+        want.minGapMs = (uint16_t)gap;
+        CycleSettings have = st_->countSettings();
+        if (want.onStableMs != have.onStableMs || want.offStableMs != have.offStableMs ||
+            want.minGapMs != have.minGapMs) {
+          st_->setCountSettings(want);
+          Serial.printf("[SYNC] counting rule on=%ld off=%ld gap=%ld\n", on, off, gap);
+        }
+        if (countListener_) countListener_(want);
+      }
     }
     http.end();
   }
 
+public:
+  typedef void (*CountListener)(const CycleSettings&);
+  void setCountListener(CountListener fn) { countListener_ = fn; }
+
 private:
+  CountListener countListener_ = nullptr;
   // Minimal JSON scalar extractors. Good enough for the flat, trusted
   // server contract; not a general parser.
   //

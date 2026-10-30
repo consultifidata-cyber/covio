@@ -15,6 +15,7 @@
 // at compile time) in nvs_keys.h -- raw string literals are no longer used
 // here. See that header for the KEY_TOO_LONG defect this closes.
 #include "nvs_keys.h"
+#include "cycle_counter.h"
 
 class Store {
 public:
@@ -100,6 +101,19 @@ public:
   float    kFactor()              { return p_.getFloat(NVS_KEY_KFACTOR, 0.0f); }
   float    density()              { return p_.getFloat(NVS_KEY_DENSITY, 0.0f); }
   float    tRef()                 { return p_.getFloat(NVS_KEY_TREF,    15.0f); }
+  // D-315 · per-machine counting rule; all zero = edge counting, as before.
+  CycleSettings countSettings() {
+    CycleSettings s;
+    s.onStableMs  = p_.getUShort(NVS_KEY_CNT_ON, 0);
+    s.offStableMs = p_.getUShort(NVS_KEY_CNT_OFF, 0);
+    s.minGapMs    = p_.getUShort(NVS_KEY_CNT_GAP, 0);
+    return s;
+  }
+  void setCountSettings(const CycleSettings& s) {
+    p_.putUShort(NVS_KEY_CNT_ON, s.onStableMs);
+    p_.putUShort(NVS_KEY_CNT_OFF, s.offStableMs);
+    p_.putUShort(NVS_KEY_CNT_GAP, s.minGapMs);
+  }
 
   // Wipe all NVS keys in our namespace; next boot re-seeds from config.h.
   // RISK-15: deliberately does NOT clear the security-version floor
