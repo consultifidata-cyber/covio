@@ -57,14 +57,18 @@
 // REVERTED 2026-08-11 TO THE KEY THE DEPLOYED FLEET ACTUALLY TRUSTS.
 // ===========================================================================
 // This file previously carried the public half of the 2026-07-26 ceremony key
-// (id "covio-prod-key-2026-07"). THAT KEY'S PRIVATE HALF IS LOST. The ceremony
-// wrote it to server/tools/.production_signing_key.pem "on this laptop" to be
-// moved to a vault; it was never moved, the file is gone, and nobody holds it.
+// (id "covio-prod-key-2026-07"). On 2026-08-11 its private half was believed
+// LOST. CORRECTION, 2026-10-31: it is not. It is on Amar's laptop as
+// server/tools/.production_signing_key.pem in the covio-main checkout, and
+// boards built from branch miki-wire-enterprise-hardening (1.4.0, 8c619d6)
+// trust it. Pravat's board was one: Amar signed its 1.5.0 manifest with that
+// key on 31 Oct and it moved, over the air, to the key below.
 //
-// Any image built with that key embedded can NEVER be sent a signed update
-// again -- the device would verify against a key no one on earth can sign
-// with, and the only recovery is a USB visit to each unit. v1.1.0 and v1.2.0
-// shipped that way and are marked DO-NOT-FLASH prereleases for this reason.
+// So two anchors exist in the field: covio-prod-key-2026-07 (Amar's builds)
+// and covio-prod-erp-2026-07 (this file). Each board takes one signed update
+// with the key it trusts and then trusts this file's. Both private halves are
+// plain files on laptops and belong in a vault. v1.1.0 and v1.2.0 stay
+// DO-NOT-FLASH until every board on the old anchor has moved.
 //
 // The key below is the one the commissioned Balaji meter is already running
 // against, and whose private half genuinely exists and is in the owner's
