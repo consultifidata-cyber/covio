@@ -193,6 +193,46 @@ static void disabledSettingsReportDisabled() {
   CHECK(wire().enabled());
 }
 
+// D-320 · the event log: every count and every refusal, with its time.
+static void eventsRecordCountsAndRefusals() {
+  CycleSettings s;
+  s.onStableMs = 30;
+  s.offStableMs = 50;
+  s.minGapMs = 3000;
+  CycleCounter c;
+  c.configure(s);
+  uint32_t t = 0;
+  // A stroke at ~1 s, the ram seen again 2 s later (refused), the next stroke 4.5 s after the first.
+  run(c, {{false, 1000}, {true, 200}, {false, 1800}, {true, 200}, {false, 2300}, {true, 200}, {false, 500}}, t);
+  CHECK(c.counted() == 2);
+  CHECK(c.tooSoon() == 1);
+  CycleEvent ev[CycleCounter::kEventLog];
+  uint8_t n = c.recentEvents(ev);
+  CHECK(n == 3);
+  CHECK(ev[0].index == 1 && ev[0].counted && ev[0].atMs == 1030);
+  CHECK(ev[1].index == 2 && !ev[1].counted && ev[1].atMs == 3030);
+  CHECK(ev[2].index == 3 && ev[2].counted && ev[2].atMs == 5530);
+  CHECK(ev[0].highMs == 30);
+}
+
+static void eventLogKeepsTheNewestInOrder() {
+  CycleSettings s;
+  s.onStableMs = 10;
+  s.offStableMs = 10;
+  s.minGapMs = 100;
+  CycleCounter c;
+  c.configure(s);
+  uint32_t t = 0;
+  for (int i = 0; i < 40; i++) run(c, {{false, 100}, {true, 100}}, t);
+  CHECK(c.counted() == 40);
+  CycleEvent ev[CycleCounter::kEventLog];
+  uint8_t n = c.recentEvents(ev);
+  CHECK(n == CycleCounter::kEventLog);
+  CHECK(ev[0].index == 40 - CycleCounter::kEventLog + 1);
+  CHECK(ev[n - 1].index == 40);
+  for (uint8_t i = 1; i < n; i++) CHECK(ev[i].index == ev[i - 1].index + 1 && ev[i].atMs > ev[i - 1].atMs);
+}
+
 int main() {
   cleanStroke();
   flickerStormAtArrival();
@@ -206,10 +246,12 @@ int main() {
   millisWrapIsSafe();
   startingAtTheSensorDoesNotCount();
   disabledSettingsReportDisabled();
+  eventsRecordCountsAndRefusals();
+  eventLogKeepsTheNewestInOrder();
   if (failures) {
     std::printf("%d FAILED\n", failures);
     return 1;
   }
-  std::printf("ALL PASS (12 cases)\n");
+  std::printf("ALL PASS (14 cases)\n");
   return 0;
 }

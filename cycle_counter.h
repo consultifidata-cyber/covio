@@ -31,6 +31,14 @@
 // it, so a sensor drifting toward the edge of its range is visible the same
 // day instead of becoming production.
 //
+// STROKE TIMES (Covio D-320, firmware 1.6.0). Totals every few seconds cannot
+// say HOW a count happened: two strokes 4 s apart and one stroke seen twice
+// 2 s apart both read "2" in a 5-second report. So every decision is also kept
+// in a small ring: the sample time of each counted cycle and of each confirmed
+// HIGH refused as too soon, with a running index. The push sends the newest
+// `kEventLog` entries every time (overlapping, de-duplicated by index on the
+// server), so a failed push loses nothing and the server sees the exact rhythm.
+//
 // LIMIT, STATED: the caller samples at ~1 ms. A real cycle whose HIGH lasts
 // less than `onStableMs` is not seen -- settings are a commissioning fact,
 // proven by a hand count, exactly as a K-factor is.
@@ -46,8 +54,18 @@ struct CycleSettings {
   bool enabled() const { return onStableMs != 0 || offStableMs != 0 || minGapMs != 0; }
 };
 
+/** One decision the counter made: a counted cycle, or a HIGH refused as too soon. */
+struct CycleEvent {
+  uint32_t index;   // running index over both kinds, from 1; 0 = empty slot
+  uint32_t atMs;    // the sample time, same clock as sample()'s nowMs
+  uint16_t highMs;  // how long the input had been HIGH when it was confirmed
+  bool counted;     // false = refused as too soon
+};
+
 class CycleCounter {
  public:
+  static const uint8_t kEventLog = 24;
+
   void configure(const CycleSettings& s) { settings_ = s; }
   const CycleSettings& settings() const { return settings_; }
 
@@ -74,14 +92,30 @@ class CycleCounter {
 
     confirmed_ = candidate_;
     if (!confirmed_) return false;
+    const uint16_t held = (uint16_t)((nowMs - candidateSince_) > 65535 ? 65535 : (nowMs - candidateSince_));
     if (haveCounted_ && (uint32_t)(nowMs - lastCountMs_) < settings_.minGapMs) {
       tooSoon_++;
+      log_(nowMs, held, false);
       return false;
     }
     haveCounted_ = true;
     lastCountMs_ = nowMs;
     counted_++;
+    log_(nowMs, held, true);
     return true;
+  }
+
+  /**
+   * The newest events, oldest first, into `out` (room for kEventLog).
+   * Returns how many were written.
+   */
+  uint8_t recentEvents(CycleEvent* out) const {
+    uint8_t n = 0;
+    for (uint8_t i = 0; i < kEventLog; i++) {
+      const CycleEvent& e = log_buf_[(uint8_t)((logNext_ + i) % kEventLog)];
+      if (e.index != 0) out[n++] = e;
+    }
+    return n;
   }
 
   uint32_t counted() const { return counted_; }
@@ -101,4 +135,16 @@ class CycleCounter {
   uint32_t counted_ = 0;
   uint32_t rawRises_ = 0;
   uint32_t tooSoon_ = 0;
+  CycleEvent log_buf_[kEventLog] = {};
+  uint8_t logNext_ = 0;
+  uint32_t logIndex_ = 0;
+
+  void log_(uint32_t atMs, uint16_t highMs, bool counted) {
+    CycleEvent& e = log_buf_[logNext_];
+    e.index = ++logIndex_;
+    e.atMs = atMs;
+    e.highMs = highMs;
+    e.counted = counted;
+    logNext_ = (uint8_t)((logNext_ + 1) % kEventLog);
+  }
 };

@@ -71,7 +71,18 @@ static String countingEnvelopeJson() {
   j += ",\"on_ms\":" + String(s.onStableMs);
   j += ",\"off_ms\":" + String(s.offStableMs);
   j += ",\"gap_ms\":" + String(s.minGapMs);
-  j += "}";
+  // D-320 · the exact rhythm: [index, ms on the sampler clock, ms HIGH, 1 counted / 0 refused],
+  // newest kEventLog every push, with the clock's value now so the server can place them.
+  CycleEvent ev[CycleCounter::kEventLog];
+  uint8_t n = totalizer.cycleEvents(ev);
+  j += ",\"now_ms\":" + String(Totalizer::samplerNowMs());
+  j += ",\"ev\":[";
+  for (uint8_t i = 0; i < n; i++) {
+    if (i) j += ",";
+    j += "[" + String(ev[i].index) + "," + String(ev[i].atMs) + "," + String(ev[i].highMs) + "," +
+         (ev[i].counted ? "1" : "0") + "]";
+  }
+  j += "]}";
   return j;
 }
 EventQueue    eventQueue;

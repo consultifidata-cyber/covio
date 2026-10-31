@@ -159,6 +159,15 @@ public:
   uint32_t cyclesCounted() const { return counter_.counted(); }
   uint32_t sampledRises() const { return counter_.rawRises(); }
   uint32_t cyclesTooSoon() const { return counter_.tooSoon(); }
+  /** D-320 · the newest counts and refusals, read under the sampler's lock. */
+  uint8_t cycleEvents(CycleEvent* out) {
+    portENTER_CRITICAL(&samplerMux_);
+    uint8_t n = counter_.recentEvents(out);
+    portEXIT_CRITICAL(&samplerMux_);
+    return n;
+  }
+  /** The sampler's clock now, in ms (the clock CycleEvent.atMs is on). */
+  static uint32_t samplerNowMs() { return (uint32_t)(esp_timer_get_time() / 1000); }
 
   // Call periodically. PCNT is 16-bit; we drain it into a 64-bit accumulator
   // well before it can wrap. Then checkpoint the total to SD (ping-pong).
@@ -220,8 +229,10 @@ private:
   // needs the input to HOLD for tens of milliseconds.
   static void sampleTick_(void* arg) {
     Totalizer* self = static_cast<Totalizer*>(arg);
-    self->counter_.sample(gpio_get_level((gpio_num_t)PIN_PULSE) != 0,
-                          (uint32_t)(esp_timer_get_time() / 1000));
+    const bool level = gpio_get_level((gpio_num_t)PIN_PULSE) != 0;
+    portENTER_CRITICAL(&self->samplerMux_);
+    self->counter_.sample(level, samplerNowMs());
+    portEXIT_CRITICAL(&self->samplerMux_);
   }
   void startSampler_() {
     if (!sampler_) {
@@ -349,4 +360,5 @@ private:
   uint32_t cycleFolded_ = 0;  // counter_.counted() already folded into base_
   uint64_t rawAccum_ = 0;     // PCNT edges drained while in cycle mode
   esp_timer_handle_t sampler_ = nullptr;
+  portMUX_TYPE samplerMux_ = portMUX_INITIALIZER_UNLOCKED;
 };
