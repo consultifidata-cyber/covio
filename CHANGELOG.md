@@ -18,7 +18,7 @@ phase definitions and acceptance criteria referenced below.
 
 ## [Unreleased]
 
-### v1.4.1 (station) — a light or siren step can stop by itself (Covio D-402)
+### v1.4.1 (station) — a light or siren step can stop by itself (Covio D-410)
 
 - New optional config line `PD=<index>,<seconds>`: the P line sent at that position ends that many seconds after it began (e.g. siren 5 s every 15 s, six times = `PD=0,90`). Light and siren stop separately. A malformed PD refuses the whole body; a body without PD plays exactly as v1.4.0.
 - Firmware before this ignores PD (unknown key), so the platform can send it before every board is flashed.

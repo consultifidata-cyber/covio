@@ -105,7 +105,7 @@ struct Card {
 // One alert pattern (D-292): from afterS seconds stopped, the light ('L') or
 // the siren ('S') is on for onS seconds of every everyS; everyS 0 is steady /
 // continuous, and then onS is 0.
-// Covio D-402: forS > 0 ends the pattern forS seconds after it started (a hard
+// Covio D-410: forS > 0 ends the pattern forS seconds after it started (a hard
 // stop, e.g. six 5 s blasts every 15 s = 90); 0 plays until the alert ends.
 // Carried by a separate PD=<index>,<seconds> line, which firmware before this
 // ignores (unknown key), so an older board keeps playing until a card.
@@ -264,7 +264,7 @@ inline bool parseConfigBody(const char* body, Config* out, char* err, size_t err
   bool overflowCards = false;
   KV gapKv;
   memset(&gapKv, 0, sizeof(gapKv));
-  // D-402 · PD lines, applied to the P lines in the order they were sent.
+  // D-410 · PD lines, applied to the P lines in the order they were sent.
   int64_t stopFor[MAX_PATTERNS] = {0};
   bool stopSeen[MAX_PATTERNS] = {false};
 
@@ -844,7 +844,7 @@ class StationLogic {
         const Pattern& p = c.patterns[i];
         int64_t start = p.afterS + shift;
         if (elapsed < start) continue;
-        if (p.forS > 0 && elapsed - start >= p.forS) continue;  // D-402 hard stop
+        if (p.forS > 0 && elapsed - start >= p.forS) continue;  // D-410 hard stop
         bool on = p.everyS == 0 || (elapsed - start) % p.everyS < p.onS;
         if (p.output == 'L')
           lightOn = lightOn || on;
