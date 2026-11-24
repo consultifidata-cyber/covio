@@ -274,16 +274,46 @@ int main() {
   }
 
   {
-    // A line held away from idle (a wire touched, a reader stuck) is not a bit,
-    // and quiet() waits for it to come back before idle is re-learned.
+    // A line held away from idle for a whole frame gap is where it now rests
+    // (covio D-410): quiet, so idle is re-learned. A short hold is still a glitch.
     WiegandLines l;
     l.setIdle(0, 0);
     l.setIdle(1, 0);
     l.edge(0, 1, 1000);
-    EXPECT(!l.quiet(1000 + 10 * WIEGAND_FRAME_GAP_US), "not quiet while a line is held");
+    EXPECT(!l.quiet(1000 + WIEGAND_FRAME_GAP_US / 2), "not quiet inside a frame gap");
+    EXPECT(l.quiet(1000 + WIEGAND_FRAME_GAP_US), "a level held a frame gap is quiet");
     l.edge(0, 0, 1000 + 5000);
     EXPECT(l.collector.glitches() == 1, "a 5 ms pulse is not a bit");
-    EXPECT(l.quiet(6000 + WIEGAND_FRAME_GAP_US), "quiet once it has come back");
+  }
+
+  {
+    // POWER CUT (covio D-410, Mikiwire 24 Nov 2026): the board boots before the
+    // reader has power and learns idle = 1 (pull-ups). The reader comes up and
+    // both lines settle at their real idle, 0. That is no bit: once quiet, idle
+    // is re-learned from the levels now, and the next card reads.
+    WiegandLines l;
+    l.setIdle(0, 1);
+    l.setIdle(1, 1);
+    l.edge(0, 0, 2000);
+    l.edge(1, 0, 2100);
+    uint32_t t = 2100 + WIEGAND_FRAME_GAP_US;
+    EXPECT(l.quiet(t), "quiet once the reader has settled");
+    l.setIdle(0, 0);  // what poll() does when quiet: the levels it reads now
+    l.setIdle(1, 0);
+    n = frame(0x13614EUL, 24, bits);
+    t += 1000;
+    for (uint8_t i = 0; i < n; i++) {
+      uint8_t line = bits[i] ? 1 : 0;
+      l.edge(line, 1, t);
+      l.edge(line, 0, t + 80);
+      t += 2000;
+    }
+    uint8_t out[WIEGAND_MAX_BITS + 1];
+    uint8_t got = 0;
+    EXPECT(l.collector.take(t + WIEGAND_FRAME_GAP_US, out, &got) && got == 26,
+           "the first card after a power cut is a whole frame");
+    EXPECT(decode(out, got, uid) == WG_OK && strcmp(uid, "0013614E") == 0,
+           "and it reads");
   }
 
   // ── the bench readout ──────────────────────────────────────────────────

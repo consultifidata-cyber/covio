@@ -18,6 +18,10 @@ phase definitions and acceptance criteria referenced below.
 
 ## [Unreleased]
 
+### v1.4.2 (station) — the card reader works after a power cut (Covio D-410)
+
+- A board that booted before its reader had power (every power cut) learned the unpowered line level as idle, read the reader coming up as a pulse that never ended, and was deaf to cards until a console reboot (Mikiwire boots 89–96, 21–24 Nov 2026). A line held for a whole frame gap (25 ms; a bit is ~0.1 ms) is now quiet, so idle is re-learned. Host test replays the power-cut order.
+
 ### v1.4.1 (station) — a light or siren step can stop by itself (Covio D-410)
 
 - New optional config line `PD=<index>,<seconds>`: the P line sent at that position ends that many seconds after it began (e.g. siren 5 s every 15 s, six times = `PD=0,90`). Light and siren stop separately. A malformed PD refuses the whole body; a body without PD plays exactly as v1.4.0.
