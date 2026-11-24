@@ -18,6 +18,12 @@ phase definitions and acceptance criteria referenced below.
 
 ## [Unreleased]
 
+### v1.4.1 (station) — a light or siren step can stop by itself (Covio D-402)
+
+- New optional config line `PD=<index>,<seconds>`: the P line sent at that position ends that many seconds after it began (e.g. siren 5 s every 15 s, six times = `PD=0,90`). Light and siren stop separately. A malformed PD refuses the whole body; a body without PD plays exactly as v1.4.0.
+- Firmware before this ignores PD (unknown key), so the platform can send it before every board is flashed.
+- Parity: 37 scenarios / 57,420 steps against covio `station-logic.ts`, 0 differences.
+
 ### v1.3.1 — every cloud call now finishes inside one watchdog window
 
 - Fixed: a task-watchdog crash loop on a lossy network. Live evidence from

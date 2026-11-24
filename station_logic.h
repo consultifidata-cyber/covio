@@ -105,11 +105,16 @@ struct Card {
 // One alert pattern (D-292): from afterS seconds stopped, the light ('L') or
 // the siren ('S') is on for onS seconds of every everyS; everyS 0 is steady /
 // continuous, and then onS is 0.
+// Covio D-402: forS > 0 ends the pattern forS seconds after it started (a hard
+// stop, e.g. six 5 s blasts every 15 s = 90); 0 plays until the alert ends.
+// Carried by a separate PD=<index>,<seconds> line, which firmware before this
+// ignores (unknown key), so an older board keeps playing until a card.
 struct Pattern {
   int64_t afterS;
   char output;
   int64_t onS;
   int64_t everyS;
+  int64_t forS;
 };
 
 struct Window {
@@ -259,6 +264,9 @@ inline bool parseConfigBody(const char* body, Config* out, char* err, size_t err
   bool overflowCards = false;
   KV gapKv;
   memset(&gapKv, 0, sizeof(gapKv));
+  // D-402 · PD lines, applied to the P lines in the order they were sent.
+  int64_t stopFor[MAX_PATTERNS] = {0};
+  bool stopSeen[MAX_PATTERNS] = {false};
 
   const char* p = body;
   int lineNo = 0;
@@ -379,6 +387,7 @@ inline bool parseConfigBody(const char* body, Config* out, char* err, size_t err
         for (size_t i = 0; i < olen; i++) pt.onS = pt.onS * 10 + (on[i] - '0');
         pt.everyS = 0;
         for (size_t i = 0; i < elen; i++) pt.everyS = pt.everyS * 10 + (c3[1 + i] - '0');
+        pt.forS = 0;
         bool shape = pt.everyS == 0 ? pt.onS == 0 : (pt.onS >= 1 && pt.onS < pt.everyS);
         if (!shape || pt.afterS < MIN_STOP_ALLOWANCE_S) {
           setErr("pattern");
@@ -389,6 +398,22 @@ inline bool parseConfigBody(const char* body, Config* out, char* err, size_t err
           return false;
         }
         out->patterns[out->patternCount++] = pt;
+      } else if (keyFits && strcmp(key, "PD") == 0) {
+        // ^(\d),(\d{1,4})$ — the pattern's index (as sent) and its hard stop, 1..7200 s.
+        const char* comma = (const char*)memchr(v, ',', vlen);
+        size_t ilen = comma ? (size_t)(comma - v) : 0;
+        size_t slen = comma ? vlen - ilen - 1 : 0;
+        bool ok = comma && ilen == 1 && isDigits(v, 1) && slen >= 1 && slen <= 4 &&
+                  isDigits(comma + 1, slen);
+        int idx = ok ? v[0] - '0' : -1;
+        int64_t secs = 0;
+        for (size_t i = 0; ok && i < slen; i++) secs = secs * 10 + (comma[1 + i] - '0');
+        if (!ok || idx >= MAX_PATTERNS || stopSeen[idx] || secs < 1 || secs > 7200) {
+          setErr("pattern");
+          return false;
+        }
+        stopSeen[idx] = true;
+        stopFor[idx] = secs;
       } else if (keyFits && strcmp(key, "END") == 0) {
         // Number(v): trimmed; "" is 0; anything not a plain integer is NaN here.
         haveEnd = true;
@@ -476,6 +501,14 @@ inline bool parseConfigBody(const char* body, Config* out, char* err, size_t err
   out->correctS = values[10];
   out->tzMinutes = values[11];
   out->gapS = gapS;
+  for (int i = 0; i < MAX_PATTERNS; i++) {
+    if (!stopSeen[i]) continue;
+    if (i >= out->patternCount) {
+      setErr("pattern");
+      return false;
+    }
+    out->patterns[i].forS = stopFor[i];
+  }
   // [...patterns].sort((a, b) => a.afterS - b.afterS): stable, so an insertion sort.
   for (int i = 1; i < out->patternCount; i++) {
     Pattern k = out->patterns[i];
@@ -811,6 +844,7 @@ class StationLogic {
         const Pattern& p = c.patterns[i];
         int64_t start = p.afterS + shift;
         if (elapsed < start) continue;
+        if (p.forS > 0 && elapsed - start >= p.forS) continue;  // D-402 hard stop
         bool on = p.everyS == 0 || (elapsed - start) % p.everyS < p.onS;
         if (p.output == 'L')
           lightOn = lightOn || on;
