@@ -74,6 +74,11 @@
 #if STATION_GOVERNOR_TEST && defined(RELEASE_BUILD) && RELEASE_BUILD
 #error "STATION_GOVERNOR_TEST is a bench-only build"
 #endif
+// covio D-436: save the spool count to NVS after this many pulses (5 % of
+// Wire Line 1's spool).
+#ifndef STATION_SPOOL_SAVE_STEP
+#define STATION_SPOOL_SAVE_STEP 400
+#endif
 #ifndef STATION_TASK_PERIOD_MS
 #define STATION_TASK_PERIOD_MS 20  // reader poll and output refresh
 #endif
@@ -108,6 +113,8 @@ class StationRuntime {
     prefs_.begin("station", false);
     bool ack = prefs_.getBool("ack", false);
     logic_->boot(ack);
+    persistedSpool_ = (int64_t)prefs_.getUInt("spool", 0);
+    logic_->restoreSpoolProgress(persistedSpool_);  // covio D-436
     restoreConfig();
     pinMode(PIN_STATION_BEEPER, OUTPUT);
     digitalWrite(PIN_STATION_BEEPER, LOW);
@@ -164,6 +171,16 @@ class StationRuntime {
     if (ack != persistedAck_) {  // flash writes stay in the loop
       prefs_.putBool("ack", ack);
       persistedAck_ = ack;
+    }
+    // covio D-436: the spool count, every STATION_SPOOL_SAVE_STEP pulses and at
+    // each spool end (about 200 small NVS writes a day on Wire Line 1). A power
+    // cut loses at most one step, well inside the 90 % spool-end line.
+    xSemaphoreTake(lock_, portMAX_DELAY);
+    int64_t spool = logic_->spoolProgress();
+    xSemaphoreGive(lock_);
+    if (spool < persistedSpool_ || spool - persistedSpool_ >= STATION_SPOOL_SAVE_STEP) {
+      prefs_.putUInt("spool", (uint32_t)(spool > 0xFFFFFFFFLL ? 0xFFFFFFFFLL : spool));
+      persistedSpool_ = spool;
     }
     return n;
   }
@@ -548,6 +565,7 @@ class StationRuntime {
   TaskHandle_t task_ = nullptr;
   Preferences prefs_;
   bool persistedAck_ = false;
+  int64_t persistedSpool_ = 0;  // covio D-436
   OutputGovernor governor_;
   Pca9554Outputs outputs_;
   volatile bool outputsOk_ = false;

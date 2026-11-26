@@ -555,6 +555,10 @@ class StationLogic {
   const Config& config() const { return *cfg_; }
   bool armed() const { return armed_; }
   bool acknowledged() const { return acknowledged_; }
+  // covio D-436: pulses since the last spool end, for the runtime to save, and
+  // the saved count put back after boot. boot() keeps it.
+  int64_t spoolProgress() const { return spoolProgress_; }
+  void restoreSpoolProgress(int64_t pulses) { spoolProgress_ = pulses > 0 ? pulses : 0; }
 
   void boot(bool durableAck) {
     armed_ = false;
@@ -638,9 +642,8 @@ class StationLogic {
       if (!hasRunSince_) {
         hasRunSince_ = true;
         runSince_ = t;
-        runPulses_ = 0;
       }
-      runPulses_ += in.pulses;
+      spoolProgress_ += in.pulses;
       hasLastPulse_ = true;
       lastPulseS_ = t;
       if (!armed_ && t - runSince_ >= (int64_t)ARM_AFTER_RUNNING_S) {
@@ -651,7 +654,6 @@ class StationLogic {
         endStopContext();
       }
     } else if (hasLastPulse_ && !stopOpen_ && t - lastPulseS_ >= (c ? c->gapS : DEFAULT_GAP_S)) {
-      lastRunPulses_ = runPulses_;
       hasRunSince_ = false;
       hasRecoveredRunStart_ = false;
       const bool join = hasResumed_ && lastPulseS_ - resumed_.at < RESTART_JOIN_S;
@@ -673,8 +675,12 @@ class StationLogic {
         ackAction_ = resumed_.ackAction;
         attended_ = resumed_.attended;
       } else {
-        bool fullSpool = c != nullptr && c->spoolAllowanceS > 0 && c->spoolPulses > 0 &&
-                         (double)lastRunPulses_ >= FULL_SPOOL_SHARE * (double)c->spoolPulses;
+        const bool spoolSet = c != nullptr && c->spoolAllowanceS > 0 && c->spoolPulses > 0;
+        const bool fullSpool =
+            spoolSet && (double)spoolProgress_ >= FULL_SPOOL_SHARE * (double)c->spoolPulses;
+        // covio D-436: a spool end starts the next spool's count; without a
+        // spool there is nothing to count towards.
+        if (fullSpool || !spoolSet) spoolProgress_ = 0;
         stopSince_ = lastPulseS_;
         stopInfinite_ = (c == nullptr);
         stopAllowance_ = c ? (fullSpool ? c->spoolAllowanceS : c->stopAllowanceS) : 0;
@@ -990,8 +996,9 @@ class StationLogic {
   bool hasLastTap_ = false;
   char lastTapUid_[UID_MAX + 1] = {0};
   int64_t lastTapAt_ = 0;
-  int64_t runPulses_ = 0;
-  int64_t lastRunPulses_ = 0;
+  // covio D-436: pulses since the last spool end, counted across stops and
+  // kept through a reboot (the runtime saves it to NVS).
+  int64_t spoolProgress_ = 0;
   bool sirenWasOn_ = false;  // D-292: a new siren burst is a rising edge
   // covio D-434: the stop the machine has just left, for RESTART_JOIN_S of running.
   struct Resumed {
