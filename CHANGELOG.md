@@ -18,6 +18,13 @@ phase definitions and acceptance criteria referenced below.
 
 ## [Unreleased]
 
+### v1.4.5 (station) — a spool is counted across stops and through a power cut (Covio D-436)
+
+- A stop is a spool end (Ts) when the pulses since the LAST SPOOL END reach the line, not the last run alone. The machine ends a spool by its own running count, so a spool interrupted by a breakdown, a jog or a power cut still ends at its full length; it used to sound the siren at T as a breakdown. The count starts again at each spool end, and is cleared when the config has no spool.
+- The count is saved to NVS (`station/spool`) every 400 pulses (`STATION_SPOOL_SAVE_STEP`) and at each spool end, and restored at boot: about 200 small writes a day on Wire Line 1, and a power cut loses at most 5 % of a spool.
+- Measured on Wire Line 1 (Mikiwire) over 20–26 Nov 2026: 37 of 142 siren alerts were spool ends of interrupted spools (counted since the last spool end, nearly all at exactly 100 %); 142 become 105.
+- Parity: 42 scenarios / 62,172 steps against covio `station-logic.ts`, 0 differences. The v1.4.4 logic fails the two new spool-count scenarios.
+
 ### v1.4.4 (station) — a short restart is the same stop (Covio D-434)
 
 - A restart that runs for less than 120 s (`RESTART_JOIN_S`) and stops again continues the stop it followed. The stop keeps its start, its allowance (a spool end keeps Ts) and its alert state: blasts already played, a card already tapped, the siren ceiling already used. A jog or a failed restart no longer sounds the siren again. A run of 120 s or more makes the next stop a new one, as before.
