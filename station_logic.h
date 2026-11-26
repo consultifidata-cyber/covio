@@ -70,6 +70,10 @@ static const int64_t GAP_MAX_S = 60;
 static const int64_t MIN_STOP_ALLOWANCE_S = 10;
 static const uint32_t SAME_CARD_IGNORE_S = 3;
 static const double FULL_SPOOL_SHARE = 0.96;
+// covio D-434: a restart that runs for less than this and stops again is the
+// same stop -- its start, allowance and alert carry on, so a jog or a failed
+// restart never sounds the siren a second time.
+static const int64_t RESTART_JOIN_S = 120;
 static const uint32_t ANNOUNCEMENT_S = 4;
 // D-292: a body with alert patterns (P= lines) plays them until a card is
 // tapped, the machine runs again or quiet begins. The siren stops for this stop
@@ -568,6 +572,7 @@ class StationLogic {
     hasQuietUntil_ = false;
     quietBy_ = Q_NONE;
     sirenWasOn_ = false;
+    hasResumed_ = false;
   }
 
   // Apply a downloaded body whole, or keep the old config and say why.
@@ -609,10 +614,27 @@ class StationLogic {
         Event& e = push(out, EV_RUNNING);
         e.hasStop = true;
         e.stopTs = stopSince_;
+        // covio D-434: remember the stop whole, before steady running ends it.
+        hasResumed_ = true;
+        resumed_.at = t;
+        resumed_.since = stopSince_;
+        resumed_.allowance = stopAllowance_;
+        resumed_.infinite = stopInfinite_;
+        resumed_.alerting = alerting_;
+        resumed_.alertAt = alertAt_;
+        resumed_.nextSoundAt = nextSoundAt_;
+        resumed_.sounds = sounds_;
+        resumed_.soundSeconds = soundSeconds_;
+        resumed_.exhausted = exhausted_;
+        resumed_.acknowledged = acknowledged_;
+        resumed_.hasAckAction = hasAckAction_;
+        resumed_.ackAction = ackAction_;
+        resumed_.attended = attended_;
         stopOpen_ = false;
         hasRecoveredRunStart_ = true;
         recoveredRunStart_ = t;
       }
+      if (hasResumed_ && t - resumed_.at >= RESTART_JOIN_S) hasResumed_ = false;
       if (!hasRunSince_) {
         hasRunSince_ = true;
         runSince_ = t;
@@ -632,12 +654,31 @@ class StationLogic {
       lastRunPulses_ = runPulses_;
       hasRunSince_ = false;
       hasRecoveredRunStart_ = false;
-      bool fullSpool = c != nullptr && c->spoolAllowanceS > 0 && c->spoolPulses > 0 &&
-                       (double)lastRunPulses_ >= FULL_SPOOL_SHARE * (double)c->spoolPulses;
+      const bool join = hasResumed_ && lastPulseS_ - resumed_.at < RESTART_JOIN_S;
+      hasResumed_ = false;
       stopOpen_ = true;
-      stopSince_ = lastPulseS_;
-      stopInfinite_ = (c == nullptr);
-      stopAllowance_ = c ? (fullSpool ? c->spoolAllowanceS : c->stopAllowanceS) : 0;
+      if (join) {
+        // covio D-434: a short restart -- the stop it followed continues, alert and all.
+        stopSince_ = resumed_.since;
+        stopAllowance_ = resumed_.allowance;
+        stopInfinite_ = resumed_.infinite;
+        alerting_ = resumed_.alerting;
+        alertAt_ = resumed_.alertAt;
+        nextSoundAt_ = resumed_.nextSoundAt;
+        sounds_ = resumed_.sounds;
+        soundSeconds_ = resumed_.soundSeconds;
+        exhausted_ = resumed_.exhausted;
+        acknowledged_ = resumed_.acknowledged;
+        hasAckAction_ = resumed_.hasAckAction;
+        ackAction_ = resumed_.ackAction;
+        attended_ = resumed_.attended;
+      } else {
+        bool fullSpool = c != nullptr && c->spoolAllowanceS > 0 && c->spoolPulses > 0 &&
+                         (double)lastRunPulses_ >= FULL_SPOOL_SHARE * (double)c->spoolPulses;
+        stopSince_ = lastPulseS_;
+        stopInfinite_ = (c == nullptr);
+        stopAllowance_ = c ? (fullSpool ? c->spoolAllowanceS : c->stopAllowanceS) : 0;
+      }
     }
 
     // ── quiet ──────────────────────────────────────────────────────────────
@@ -952,6 +993,25 @@ class StationLogic {
   int64_t runPulses_ = 0;
   int64_t lastRunPulses_ = 0;
   bool sirenWasOn_ = false;  // D-292: a new siren burst is a rising edge
+  // covio D-434: the stop the machine has just left, for RESTART_JOIN_S of running.
+  struct Resumed {
+    int64_t at = 0;
+    int64_t since = 0;
+    int64_t allowance = 0;
+    bool infinite = false;
+    bool alerting = false;
+    int64_t alertAt = 0;
+    int64_t nextSoundAt = 0;
+    int64_t sounds = 0;
+    int64_t soundSeconds = 0;
+    bool exhausted = false;
+    bool acknowledged = false;
+    bool hasAckAction = false;
+    uint32_t ackAction = 0;
+    bool attended = false;
+  };
+  bool hasResumed_ = false;
+  Resumed resumed_;
 };
 
 // Append printf-style output at *o, never past len (C++11: the board's toolchain).
