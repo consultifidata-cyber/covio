@@ -185,10 +185,14 @@ class WiegandLines {
   }
 
   // True when neither line has moved for a frame gap: the idle level may be
-  // re-learned now.
+  // re-learned now. A line HELD away from its idle level for a whole frame gap
+  // counts as quiet too (covio D-410): a Wiegand bit lasts ~0.1 ms, so a level
+  // that has not moved for 25 ms is where the line rests, not a bit. Without
+  // this, a board that boots before its reader is powered (every power cut)
+  // learns the unpowered level as idle, reads the reader coming up as a pulse
+  // that never ends, never re-learns, and is deaf until a console reboot.
   bool quiet(uint32_t nowUs) const {
-    return !inPulse_[0] && !inPulse_[1] &&
-           (!anyEdge_ || (uint32_t)(nowUs - lastEdgeUs_) >= WIEGAND_FRAME_GAP_US);
+    return !anyEdge_ || (uint32_t)(nowUs - lastEdgeUs_) >= WIEGAND_FRAME_GAP_US;
   }
 
   uint32_t strays() const { return strays_; }

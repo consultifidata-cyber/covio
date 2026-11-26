@@ -18,6 +18,23 @@ phase definitions and acceptance criteria referenced below.
 
 ## [Unreleased]
 
+### v1.4.4 (station) — a short restart is the same stop (Covio D-434)
+
+- A restart that runs for less than 120 s (`RESTART_JOIN_S`) and stops again continues the stop it followed. The stop keeps its start, its allowance (a spool end keeps Ts) and its alert state: blasts already played, a card already tapped, the siren ceiling already used. A jog or a failed restart no longer sounds the siren again. A run of 120 s or more makes the next stop a new one, as before.
+- Measured on Wire Line 1 (Mikiwire) over 20–26 Nov 2026: 172 siren alerts become 135.
+- Parity: 40 scenarios / 59,226 steps against covio `station-logic.ts`, 0 differences. The v1.4.2 logic fails 24 of them.
+- v1.4.3 was a version-only image used to prove the over-the-air path on 26 Nov 2026 (Covio D-427).
+
+### v1.4.2 (station) — the card reader works after a power cut (Covio D-410)
+
+- A board that booted before its reader had power (every power cut) learned the unpowered line level as idle, read the reader coming up as a pulse that never ended, and was deaf to cards until a console reboot (Mikiwire boots 89–96, 21–24 Nov 2026). A line held for a whole frame gap (25 ms; a bit is ~0.1 ms) is now quiet, so idle is re-learned. Host test replays the power-cut order.
+
+### v1.4.1 (station) — a light or siren step can stop by itself (Covio D-410)
+
+- New optional config line `PD=<index>,<seconds>`: the P line sent at that position ends that many seconds after it began (e.g. siren 5 s every 15 s, six times = `PD=0,90`). Light and siren stop separately. A malformed PD refuses the whole body; a body without PD plays exactly as v1.4.0.
+- Firmware before this ignores PD (unknown key), so the platform can send it before every board is flashed.
+- Parity: 37 scenarios / 57,420 steps against covio `station-logic.ts`, 0 differences.
+
 ### v1.3.1 — every cloud call now finishes inside one watchdog window
 
 - Fixed: a task-watchdog crash loop on a lossy network. Live evidence from
