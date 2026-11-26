@@ -11,8 +11,9 @@
 // What the board knows: card CLASSES (A action, P person, Q quiet, C
 // commissioning) and opaque NUMBERS. It never knows what an action means, a
 // team, a person's name or an escalation step, and it never takes a sound
-// command from the cloud. Sound is bounded HERE (SOUND_CAPS) whatever a config
-// says, and again in the output driver (station_io.h).
+// command from the cloud. Sound is bounded HERE (the CAP_* announcements, or
+// SIREN_CEILING_S of sound per stop for a body with alert patterns, D-292)
+// whatever a config says, and again in the output driver (station_io.h).
 //
 // ⚠ This is logic. Light and sound here are values. Nothing about the real
 // expander's reset state, the sounder's current or the light's wiring is
@@ -59,22 +60,65 @@ enum : uint8_t {
 static const uint32_t CAP_BURST_S = 10;
 static const uint32_t CAP_PER_STOP = 5;
 static const uint32_t CAP_SECONDS_PER_STOP = 60;
-static const uint32_t ARM_AFTER_RUNNING_S = 60;
+// D-285: 0 -- the station arms on the first pulse (was 60 s of steady running).
+static const uint32_t ARM_AFTER_RUNNING_S = 0;
+// D-285: seconds without a pulse before the machine reads stopped, when the
+// body carries no GAP; and the GAP and T a body may carry.
+static const int64_t DEFAULT_GAP_S = 1;
+static const int64_t GAP_MIN_S = 1;
+static const int64_t GAP_MAX_S = 60;
+static const int64_t MIN_STOP_ALLOWANCE_S = 10;
 static const uint32_t SAME_CARD_IGNORE_S = 3;
 static const double FULL_SPOOL_SHARE = 0.96;
+// covio D-434: a restart that runs for less than this and stops again is the
+// same stop -- its start, allowance and alert carry on, so a jog or a failed
+// restart never sounds the siren a second time.
+static const int64_t RESTART_JOIN_S = 120;
 static const uint32_t ANNOUNCEMENT_S = 4;
+// D-292: a body with alert patterns (P= lines) plays them until a card is
+// tapped, the machine runs again or quiet begins. The siren stops for this stop
+// after SIREN_CEILING_S of sound; with the reader down (no card can silence it)
+// after SIREN_CEILING_READER_DOWN_S.
+static const int64_t SIREN_CEILING_S = 600;
+static const int64_t SIREN_CEILING_READER_DOWN_S = 60;
+static const int MAX_PATTERNS = 4;
+// D-292: a fast pattern would queue a row per burst; the first few say enough.
+static const int64_t MAX_SOUND_EVENTS = 5;
 
 static const int MAX_CARDS = 1024;
 static const int MAX_WINDOWS = 6;
 static const int UID_MAX = 20;  // hex characters
 
-enum Light : uint8_t { L_OFF = 0, L_GREEN = 1, L_AMBER = 2, L_RED_BLINK = 3, L_AMBER_BLINK = 4 };
+// L_RED (D-292) is steady: a pattern switches it on and off second by second.
+enum Light : uint8_t {
+  L_OFF = 0,
+  L_GREEN = 1,
+  L_AMBER = 2,
+  L_RED_BLINK = 3,
+  L_AMBER_BLINK = 4,
+  L_RED = 5
+};
 enum Beep : uint8_t { B_NONE = 0, B_ACCEPTED = 1, B_PERSON = 2, B_REFUSED = 3 };
 
 struct Card {
   char uid[UID_MAX + 1];
   char cls;  // 'A' 'P' 'Q' 'C'
   uint32_t number;
+};
+
+// One alert pattern (D-292): from afterS seconds stopped, the light ('L') or
+// the siren ('S') is on for onS seconds of every everyS; everyS 0 is steady /
+// continuous, and then onS is 0.
+// Covio D-410: forS > 0 ends the pattern forS seconds after it started (a hard
+// stop, e.g. six 5 s blasts every 15 s = 90); 0 plays until the alert ends.
+// Carried by a separate PD=<index>,<seconds> line, which firmware before this
+// ignores (unknown key), so an older board keeps playing until a card.
+struct Pattern {
+  int64_t afterS;
+  char output;
+  int64_t onS;
+  int64_t everyS;
+  int64_t forS;
 };
 
 struct Window {
@@ -95,8 +139,11 @@ struct Config {
   int64_t recoverS;
   int64_t correctS;
   int64_t tzMinutes;
+  int64_t gapS;  // D-285
   int windowCount;
   Window windows[MAX_WINDOWS];
+  int patternCount;  // D-292: 0 = the announcements (C, R, N)
+  Pattern patterns[MAX_PATTERNS];  // sorted by afterS, stable
   int cardCount;
   Card cards[MAX_CARDS];  // sorted by uid once parsed (binary search)
 };
@@ -219,6 +266,11 @@ inline bool parseConfigBody(const char* body, Config* out, char* err, size_t err
   bool endNaN = false;
   int64_t endValue = 0;
   bool overflowCards = false;
+  KV gapKv;
+  memset(&gapKv, 0, sizeof(gapKv));
+  // D-410 · PD lines, applied to the P lines in the order they were sent.
+  int64_t stopFor[MAX_PATTERNS] = {0};
+  bool stopSeen[MAX_PATTERNS] = {false};
 
   const char* p = body;
   int lineNo = 0;
@@ -311,6 +363,61 @@ inline bool parseConfigBody(const char* body, Config* out, char* err, size_t err
             cd.number = number;
           }
         }
+      } else if (keyFits && strcmp(key, "P") == 0) {
+        // D-292: ^(d{1,5}),([LS]),(d{1,4}),(d{1,4})$, then the shape rule,
+        // then the cap -- in that order, at the line, as the reference does.
+        const char* c1 = (const char*)memchr(v, ',', vlen);
+        size_t alen = c1 ? (size_t)(c1 - v) : 0;
+        bool ok = c1 && alen >= 1 && alen <= 5 && isDigits(v, alen);
+        size_t rest = ok ? vlen - alen - 1 : 0;
+        const char* r = ok ? c1 + 1 : nullptr;
+        ok = ok && rest >= 2 && (r[0] == 'L' || r[0] == 'S') && r[1] == ',';
+        const char* on = ok ? r + 2 : nullptr;
+        size_t onRest = ok ? rest - 2 : 0;
+        const char* c3 = ok ? (const char*)memchr(on, ',', onRest) : nullptr;
+        size_t olen = c3 ? (size_t)(c3 - on) : 0;
+        ok = ok && c3 && olen >= 1 && olen <= 4 && isDigits(on, olen);
+        size_t elen = ok ? onRest - olen - 1 : 0;
+        ok = ok && elen >= 1 && elen <= 4 && isDigits(c3 + 1, elen);
+        if (!ok) {
+          setErr("pattern");
+          return false;
+        }
+        Pattern pt;
+        pt.afterS = 0;
+        for (size_t i = 0; i < alen; i++) pt.afterS = pt.afterS * 10 + (v[i] - '0');
+        pt.output = r[0];
+        pt.onS = 0;
+        for (size_t i = 0; i < olen; i++) pt.onS = pt.onS * 10 + (on[i] - '0');
+        pt.everyS = 0;
+        for (size_t i = 0; i < elen; i++) pt.everyS = pt.everyS * 10 + (c3[1 + i] - '0');
+        pt.forS = 0;
+        bool shape = pt.everyS == 0 ? pt.onS == 0 : (pt.onS >= 1 && pt.onS < pt.everyS);
+        if (!shape || pt.afterS < MIN_STOP_ALLOWANCE_S) {
+          setErr("pattern");
+          return false;
+        }
+        if (out->patternCount >= MAX_PATTERNS) {
+          setErr("cap:P");
+          return false;
+        }
+        out->patterns[out->patternCount++] = pt;
+      } else if (keyFits && strcmp(key, "PD") == 0) {
+        // ^(\d),(\d{1,4})$ — the pattern's index (as sent) and its hard stop, 1..7200 s.
+        const char* comma = (const char*)memchr(v, ',', vlen);
+        size_t ilen = comma ? (size_t)(comma - v) : 0;
+        size_t slen = comma ? vlen - ilen - 1 : 0;
+        bool ok = comma && ilen == 1 && isDigits(v, 1) && slen >= 1 && slen <= 4 &&
+                  isDigits(comma + 1, slen);
+        int idx = ok ? v[0] - '0' : -1;
+        int64_t secs = 0;
+        for (size_t i = 0; ok && i < slen; i++) secs = secs * 10 + (comma[1 + i] - '0');
+        if (!ok || idx >= MAX_PATTERNS || stopSeen[idx] || secs < 1 || secs > 7200) {
+          setErr("pattern");
+          return false;
+        }
+        stopSeen[idx] = true;
+        stopFor[idx] = secs;
       } else if (keyFits && strcmp(key, "END") == 0) {
         // Number(v): trimmed; "" is 0; anything not a plain integer is NaN here.
         haveEnd = true;
@@ -325,6 +432,12 @@ inline bool parseConfigBody(const char* body, Config* out, char* err, size_t err
           else
             for (size_t i = a; i < b; i++) endValue = endValue * 10 + (v[i] - '0');
         }
+      } else if (keyFits && strcmp(key, "GAP") == 0) {
+        gapKv.seen = true;
+        gapKv.longValue = vlen >= sizeof(gapKv.value);
+        size_t gn = gapKv.longValue ? sizeof(gapKv.value) - 1 : vlen;
+        memcpy(gapKv.value, v, gn);
+        gapKv.value[gn] = 0;
       } else if (keyFits) {
         for (int i = 0; i < NREQ; i++) {
           if (strcmp(key, REQUIRED[i]) == 0) {
@@ -365,9 +478,19 @@ inline bool parseConfigBody(const char* body, Config* out, char* err, size_t err
     setErr("cap:seconds");
     return false;
   }
-  if (values[2] < 60) {
+  if (values[2] < MIN_STOP_ALLOWANCE_S) {
     setErr("range:T");
     return false;
+  }
+  // GAP is optional (D-285): without it the machine reads stopped after one
+  // second, as before.
+  int64_t gapS = DEFAULT_GAP_S;
+  if (gapKv.seen) {
+    if (gapKv.longValue || !parseSmallInt(gapKv.value, &gapS) || gapS < GAP_MIN_S ||
+        gapS > GAP_MAX_S) {
+      setErr("range:GAP");
+      return false;
+    }
   }
   out->version = (uint32_t)values[0];
   out->mode = (int)values[1];
@@ -381,6 +504,25 @@ inline bool parseConfigBody(const char* body, Config* out, char* err, size_t err
   out->recoverS = values[9];
   out->correctS = values[10];
   out->tzMinutes = values[11];
+  out->gapS = gapS;
+  for (int i = 0; i < MAX_PATTERNS; i++) {
+    if (!stopSeen[i]) continue;
+    if (i >= out->patternCount) {
+      setErr("pattern");
+      return false;
+    }
+    out->patterns[i].forS = stopFor[i];
+  }
+  // [...patterns].sort((a, b) => a.afterS - b.afterS): stable, so an insertion sort.
+  for (int i = 1; i < out->patternCount; i++) {
+    Pattern k = out->patterns[i];
+    int j = i - 1;
+    while (j >= 0 && out->patterns[j].afterS > k.afterS) {
+      out->patterns[j + 1] = out->patterns[j];
+      j--;
+    }
+    out->patterns[j + 1] = k;
+  }
   qsort(out->cards, out->cardCount, sizeof(Card), cardCmp);
   return true;
 }
@@ -429,6 +571,8 @@ class StationLogic {
     attended_ = false;
     hasQuietUntil_ = false;
     quietBy_ = Q_NONE;
+    sirenWasOn_ = false;
+    hasResumed_ = false;
   }
 
   // Apply a downloaded body whole, or keep the old config and say why.
@@ -470,10 +614,27 @@ class StationLogic {
         Event& e = push(out, EV_RUNNING);
         e.hasStop = true;
         e.stopTs = stopSince_;
+        // covio D-434: remember the stop whole, before steady running ends it.
+        hasResumed_ = true;
+        resumed_.at = t;
+        resumed_.since = stopSince_;
+        resumed_.allowance = stopAllowance_;
+        resumed_.infinite = stopInfinite_;
+        resumed_.alerting = alerting_;
+        resumed_.alertAt = alertAt_;
+        resumed_.nextSoundAt = nextSoundAt_;
+        resumed_.sounds = sounds_;
+        resumed_.soundSeconds = soundSeconds_;
+        resumed_.exhausted = exhausted_;
+        resumed_.acknowledged = acknowledged_;
+        resumed_.hasAckAction = hasAckAction_;
+        resumed_.ackAction = ackAction_;
+        resumed_.attended = attended_;
         stopOpen_ = false;
         hasRecoveredRunStart_ = true;
         recoveredRunStart_ = t;
       }
+      if (hasResumed_ && t - resumed_.at >= RESTART_JOIN_S) hasResumed_ = false;
       if (!hasRunSince_) {
         hasRunSince_ = true;
         runSince_ = t;
@@ -489,16 +650,35 @@ class StationLogic {
       if (hasRecoveredRunStart_ && c && t - recoveredRunStart_ >= c->recoverS) {
         endStopContext();
       }
-    } else if (hasLastPulse_ && !stopOpen_ && t - lastPulseS_ >= 1) {
+    } else if (hasLastPulse_ && !stopOpen_ && t - lastPulseS_ >= (c ? c->gapS : DEFAULT_GAP_S)) {
       lastRunPulses_ = runPulses_;
       hasRunSince_ = false;
       hasRecoveredRunStart_ = false;
-      bool fullSpool = c != nullptr && c->spoolAllowanceS > 0 && c->spoolPulses > 0 &&
-                       (double)lastRunPulses_ >= FULL_SPOOL_SHARE * (double)c->spoolPulses;
+      const bool join = hasResumed_ && lastPulseS_ - resumed_.at < RESTART_JOIN_S;
+      hasResumed_ = false;
       stopOpen_ = true;
-      stopSince_ = lastPulseS_;
-      stopInfinite_ = (c == nullptr);
-      stopAllowance_ = c ? (fullSpool ? c->spoolAllowanceS : c->stopAllowanceS) : 0;
+      if (join) {
+        // covio D-434: a short restart -- the stop it followed continues, alert and all.
+        stopSince_ = resumed_.since;
+        stopAllowance_ = resumed_.allowance;
+        stopInfinite_ = resumed_.infinite;
+        alerting_ = resumed_.alerting;
+        alertAt_ = resumed_.alertAt;
+        nextSoundAt_ = resumed_.nextSoundAt;
+        sounds_ = resumed_.sounds;
+        soundSeconds_ = resumed_.soundSeconds;
+        exhausted_ = resumed_.exhausted;
+        acknowledged_ = resumed_.acknowledged;
+        hasAckAction_ = resumed_.hasAckAction;
+        ackAction_ = resumed_.ackAction;
+        attended_ = resumed_.attended;
+      } else {
+        bool fullSpool = c != nullptr && c->spoolAllowanceS > 0 && c->spoolPulses > 0 &&
+                         (double)lastRunPulses_ >= FULL_SPOOL_SHARE * (double)c->spoolPulses;
+        stopSince_ = lastPulseS_;
+        stopInfinite_ = (c == nullptr);
+        stopAllowance_ = c ? (fullSpool ? c->spoolAllowanceS : c->stopAllowanceS) : 0;
+      }
     }
 
     // ── quiet ──────────────────────────────────────────────────────────────
@@ -611,6 +791,11 @@ class StationLogic {
       e.total = in.total;
     }
 
+    if (c && c->patternCount > 0) {
+      patternOutputs(t, *c, in, quiet, out);
+      return;
+    }
+
     bool sounding = t <= soundUntil_;
     int64_t maxSounds = c ? c->announcements : 0;
     if (maxSounds > (int64_t)CAP_PER_STOP) maxSounds = CAP_PER_STOP;
@@ -683,6 +868,74 @@ class StationLogic {
     return out->events[i];
   }
 
+  // D-292 · patternOutputs (station-logic.ts): each pattern starts afterS into
+  // the stop (shifted by the spool allowance like the alert itself) and runs,
+  // second by second, until a card, quiet, a fault or running ends the alert.
+  // The siren is bounded per stop by SIREN_CEILING_S of sound.
+  void patternOutputs(int64_t t, const Config& c, const TickInput& in, bool quiet,
+                      TickOutput* out) {
+    const bool fault = in.outputFault;
+    const bool live = alerting_ && !acknowledged_ && !quiet && stopOpen_ && !fault;
+    bool lightOn = false;
+    bool sirenOn = false;
+    if (live) {
+      int64_t elapsed = t - stopSince_;
+      int64_t shift = stopAllowance_ - c.stopAllowanceS;
+      for (int i = 0; i < c.patternCount; i++) {
+        const Pattern& p = c.patterns[i];
+        int64_t start = p.afterS + shift;
+        if (elapsed < start) continue;
+        if (p.forS > 0 && elapsed - start >= p.forS) continue;  // D-410 hard stop
+        bool on = p.everyS == 0 || (elapsed - start) % p.everyS < p.onS;
+        if (p.output == 'L')
+          lightOn = lightOn || on;
+        else
+          sirenOn = sirenOn || on;
+      }
+    }
+    int64_t ceiling = in.readerUp ? SIREN_CEILING_S : SIREN_CEILING_READER_DOWN_S;
+    // G5: with quiet windows configured, sound needs a synced clock.
+    bool gate = live && c.mode == 2 && !in.inputSuspect && !(c.windowCount > 0 && !in.hasWall);
+    bool sounding = false;
+    if (gate && sirenOn && !exhausted_) {
+      // The reader can go down after more than its ceiling of sound: the siren
+      // is spent at once, and says so.
+      if (soundSeconds_ < ceiling) {
+        sounding = true;
+        if (!sirenWasOn_) {
+          sounds_ += 1;
+          if (sounds_ <= MAX_SOUND_EVENTS) {
+            Event& e = push(out, EV_SOUND_PLAYED);
+            e.hasN = true;
+            e.n = sounds_;
+          }
+        }
+        soundSeconds_ += 1;
+      }
+      if (soundSeconds_ >= ceiling) {
+        exhausted_ = true;
+        Event& x = push(out, EV_ANNOUNCEMENTS_EXHAUSTED);
+        x.hasN = true;
+        x.n = sounds_;
+      }
+    }
+    sirenWasOn_ = sounding;
+
+    Light light;
+    if (c.mode == 0)
+      light = L_OFF;
+    else if (fault || in.inputSuspect)
+      light = L_AMBER_BLINK;
+    else if (live)
+      light = lightOn ? L_RED : L_AMBER;
+    else if (stopOpen_ || quiet || acknowledged_ || !hasLastPulse_)
+      light = L_AMBER;
+    else
+      light = L_GREEN;
+    out->light = light;
+    out->sounding = sounding;
+  }
+
   bool stopContextOpen() const { return alerting_ || acknowledged_; }
 
   void endStopContext() {
@@ -695,6 +948,7 @@ class StationLogic {
     hasAckAction_ = false;
     attended_ = false;
     hasRecoveredRunStart_ = false;
+    sirenWasOn_ = false;
   }
 
   bool inWindow(const TickInput& in) const {
@@ -738,6 +992,26 @@ class StationLogic {
   int64_t lastTapAt_ = 0;
   int64_t runPulses_ = 0;
   int64_t lastRunPulses_ = 0;
+  bool sirenWasOn_ = false;  // D-292: a new siren burst is a rising edge
+  // covio D-434: the stop the machine has just left, for RESTART_JOIN_S of running.
+  struct Resumed {
+    int64_t at = 0;
+    int64_t since = 0;
+    int64_t allowance = 0;
+    bool infinite = false;
+    bool alerting = false;
+    int64_t alertAt = 0;
+    int64_t nextSoundAt = 0;
+    int64_t sounds = 0;
+    int64_t soundSeconds = 0;
+    bool exhausted = false;
+    bool acknowledged = false;
+    bool hasAckAction = false;
+    uint32_t ackAction = 0;
+    bool attended = false;
+  };
+  bool hasResumed_ = false;
+  Resumed resumed_;
 };
 
 // Append printf-style output at *o, never past len (C++11: the board's toolchain).

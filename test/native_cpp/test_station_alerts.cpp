@@ -72,6 +72,7 @@ static const char* lightName(int l) {
     case L_AMBER: return "amber";
     case L_RED_BLINK: return "RED";
     case L_AMBER_BLINK: return "amber-blink";
+    case L_RED: return "red";
   }
   return "?";
 }

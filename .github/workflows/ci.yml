@@ -480,7 +480,7 @@ jobs:
       - name: Machine Station host tests (parity, row, outputs, alert matrix, config)
         working-directory: test/native_cpp
         run: |
-          for t in test_station_parity test_station_row test_station_io test_station_alerts test_station_config; do
+          for t in test_station_parity test_station_row test_station_io test_station_alerts test_station_config test_station_wiegand; do
             g++ -std=c++11 -O1 -Wall -Wextra -Icorun_shim -I. -I../.. "$t.cpp" -o "$t"
             "./$t"
           done

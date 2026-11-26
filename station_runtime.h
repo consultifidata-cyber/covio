@@ -119,7 +119,7 @@ class StationRuntime {
     lastCount_ = (uint16_t)c;
 #if STATION_GOVERNOR_TEST == 2
     {
-      OutputState stuck = {false, false, false, true};
+      OutputState stuck = {false, false, false, true, false, false};
       outputs_.apply(stuck);
       Serial.println("[STATION] BENCH TEST 2: DO4 forced ON and left on. The physical fence must stop the sound.");
       return true;
@@ -457,9 +457,21 @@ class StationRuntime {
     for (int i = 0; i < out.eventCount; i++) enqueue(out.events[i], second);
     lastLight_ = out.light;
     lastSounding_ = out.sounding;
-    if (out.beep != B_NONE) {
+    Beep beep = out.beep;
+    if (tap && tap[0]) {
+      if (beep != B_NONE) {
+        lastTapBeep_ = beep;
+        snprintf(lastTapUid_, sizeof(lastTapUid_), "%s", tap);
+      } else if (lastTapBeep_ != B_NONE && strcmp(lastTapUid_, tap) == 0) {
+        // The logic ignores the same card again within SAME_CARD_IGNORE_S (no
+        // second event) and so asks for no beep. Silence there read on the
+        // bench as "not read"; the same answer again says "already got it".
+        beep = lastTapBeep_;
+      }
+    }
+    if (beep != B_NONE) {
       uint32_t at = millis();
-      startBeep(out.beep, at);
+      startBeep(beep, at);
       if (tap && tap[0]) {  // a card's own feedback: tap read -> beep started
         tapMsLast_ = at - tapAtMs_;
         if (tapMsLast_ > tapMsMax_) tapMsMax_ = tapMsLast_;
@@ -486,31 +498,43 @@ class StationRuntime {
     sounding = true;  // bench test 1: ask for sound for ever; the governor must fence it
 #endif
     OutputState s = governor_.refresh(light, sounding, now);
+    // The tap's feedback, mirrored on the reader's own beeper and LED.
+    s.readerBeep = serviceBeep(now);
+    s.readerLed = readerLedUntil_ != 0 && (int32_t)(readerLedUntil_ - now) > 0;
+    if (!s.readerLed) readerLedUntil_ = 0;
     xSemaphoreTake(lock_, portMAX_DELAY);
     outputsOk_ = outputs_.apply(s);
     xSemaphoreGive(lock_);
     lastBits_ = s.bits();
-    serviceBeep(now);
   }
 
-  // Onboard beeper: accepted one short, person two short, refused one long.
+  // Tap feedback. Onboard beeper: accepted one short, person two short,
+  // refused one long. The reader's beeper (DO5) says it its own way, after the
+  // reader's own beep (readerBeepOn, station_io.h); a card the station took
+  // also lights the reader's green LED (DO6) for READER_LED_MS.
+  static const uint32_t READER_LED_MS = 1000;
   void startBeep(Beep b, uint32_t now) {
     beepPattern_ = b;
     beepStart_ = now;
+    if (b == B_ACCEPTED || b == B_PERSON) readerLedUntil_ = (now + READER_LED_MS) | 1u;
   }
-  void serviceBeep(uint32_t now) {
-    if (beepPattern_ == B_NONE) return;
+  // Drives the onboard beeper; returns whether the reader's beeper is on now.
+  bool serviceBeep(uint32_t now) {
+    if (beepPattern_ == B_NONE) return false;
     uint32_t t = now - beepStart_;
     bool on = false;
     if (beepPattern_ == B_ACCEPTED) on = t < 100;
     else if (beepPattern_ == B_PERSON) on = t < 100 || (t >= 200 && t < 300);
     else if (beepPattern_ == B_REFUSED) on = t < 500;
     digitalWrite(PIN_STATION_BEEPER, on ? HIGH : LOW);
-    if (t >= 500) {
+    if (t >= READER_BEEP_END_MS) {
       beepPattern_ = B_NONE;
       digitalWrite(PIN_STATION_BEEPER, LOW);
+      return false;
     }
+    return readerBeepOn((uint8_t)beepPattern_, t);
   }
+  uint32_t readerLedUntil_ = 0;
 
   WallClock wall_ = nullptr;
   CardReader* reader_ = nullptr;
@@ -539,6 +563,8 @@ class StationRuntime {
   volatile bool selfTest_ = false;
   uint32_t selfTestUntil_ = 0;
   Beep beepPattern_ = B_NONE;
+  Beep lastTapBeep_ = B_NONE;  // the answer to the last card, replayed on its repeat
+  char lastTapUid_[17] = {0};
   uint32_t beepStart_ = 0;
   uint32_t backlog_ = 0;
   uint32_t lost_ = 0;  // station rows the durable queue refused (flash full)
