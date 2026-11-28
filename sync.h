@@ -23,6 +23,7 @@
 // negotiates or inspects its own schema version at push time.
 // ============================================================================
 #pragma once
+#include "eth_link.h"   // 1.6.1: wired uplink counts as online
 #include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
@@ -94,7 +95,13 @@ public:
     backoff_ += (esp_random() % 1000);                     // jitter
   }
 
-  bool online() { return WiFi.status() == WL_CONNECTED; }
+  // 1.6.1: online over EITHER uplink. The wired W5500 (eth_link.h) has the
+  // higher lwIP route priority, so when both are up traffic uses the cable.
+  bool online() { return WiFi.status() == WL_CONNECTED || EthLink::up(); }
+
+  // 1.6.1 catch-up: true when the last push was acked AND was a full batch,
+  // i.e. more queued rows are very likely waiting right now.
+  bool backlogPending() { return lastPushFull_; }
 
   // ---- DM-Phase 1 (local diagnostics, §13 A.3 /api/v1/status) ----
   // Getters only -- these retain values pushOnce()/pollConfig() already
@@ -112,6 +119,7 @@ public:
   // ---- Push queued records; prune on cumulative ack_seq ----
   // Returns true if at least one record was acked this call.
   bool pushOnce() {
+    lastPushFull_ = false;                // 1.6.1: set again only by a full, acked batch
     if (!online()) return false;
     // Miki Wire hardening (Phase-0 finding F7): exponential backoff after
     // failed pushes. Previously a dead/erroring server was retried every
@@ -178,6 +186,7 @@ public:
       return false;                       // bare 200 is not an ack (Invariant 6)
     }
     pushBackoffMs_ = 0;                   // F7: genuine ack -- reset backoff
+    lastPushFull_ = (n == PUSH_BATCH_MAX); // 1.6.1 catch-up signal
     // Miki Wire hardening (Phase-0 finding F8): never trust a server ack
     // beyond the highest seq this batch actually transmitted -- see
     // ack_validation.h for the full rationale. batch[] is FIFO by append
@@ -413,6 +422,7 @@ private:
   bool     wifiAuthorityPaused_ = false;   // DM-Phase 2: see setWifiAuthorityPaused()
 
   // ---- DM-Phase 1 (local diagnostics) ----
+  bool     lastPushFull_ = false;     // 1.6.1 catch-up (see backlogPending())
   bool     haveSync_ = false;         // millis() 0 is a valid timestamp, so a
                                        // separate flag distinguishes "never
                                        // synced" from "synced at boot".

@@ -170,6 +170,7 @@ SensorCt sensorCt(CT_PULSE_HZ, CT_DEBOUNCE_MS);
 
 uint32_t seq = 0;              // GLOBALLY monotonic telemetry sequence
 uint32_t tTelemetry = 0, tPush = 0, tConfig = 0, tOta = 0;
+bool pushCatchUp = false;   // 1.6.1: backlog drain mode (see PUSH_CATCHUP_GAP_MS)
 bool     healthySignalled = false;
 bool     crashStreakCleared = false;   // Balaji V1 freeze remediation
 
@@ -362,6 +363,9 @@ void setup() {
   syncEngine.setCountListener(applyCountingRule);
   Telemetry::countingEnvelope() = countingEnvelopeJson;
   syncEngine.wifiConnect();
+  // 1.6.1: bring up the W5500 wired uplink (8DI-8DO only; no-op elsewhere).
+  // After wifiConnect() so arduino-esp32 has created the default event loop.
+  EthLink::begin();
 
   // DM-Phase 2: bounded boot-time wait for the station connection just
   // kicked off above to resolve, before deciding between normal operation
@@ -374,14 +378,14 @@ void setup() {
   // connect failure.
   bool forceAp = WifiProvision::consumeReprovisionRequest();
   uint32_t staWaitStart = millis();
-  while (!forceAp && WiFi.status() != WL_CONNECTED &&
+  while (!forceAp && WiFi.status() != WL_CONNECTED && !EthLink::up() &&
          millis() - staWaitStart < AP_FALLBACK_TIMEOUT_MS) {
     provision.service();
     syncEngine.wifiService();
     delay(50);
   }
 
-  if (!forceAp && WiFi.status() == WL_CONNECTED) {
+  if (!forceAp && (WiFi.status() == WL_CONNECTED || EthLink::up())) {
     // DM-Phase 1: local diagnostics API. Bound after wifiConnect() so the
     // getters it reads (queue backlog, ota state, etc.) are all already wired;
     // its own mDNS start is deferred internally until the STA connection is
@@ -457,7 +461,12 @@ void loop() {
   // provisioning path and skip everything below that assumes normal
   // operation is running.
   if (wifiProvision.active()) {
-    if (wifiProvision.service()) {
+    bool uplinkBack = wifiProvision.service();
+    if (!uplinkBack && EthLink::up()) {    // 1.6.1: cable plugged in while in AP mode
+      wifiProvision.stopForWiredUplink();
+      uplinkBack = true;
+    }
+    if (uplinkBack) {
       // Station WiFi just confirmed while AP mode was active -- hand WiFi
       // authority back to Sync and start normal-operation local diagnostics.
       syncEngine.setWifiAuthorityPaused(false);
@@ -587,10 +596,15 @@ void loop() {
   bool netSlotUsed = false;
 
   // ---- flush queue to the configured endpoint ----
-  if (now - tPush >= PUSH_PERIOD_MS) {
+  // 1.6.1 catch-up: while full batches keep being acked (backlog waiting),
+  // the next push is due PUSH_CATCHUP_GAP_MS after this one FINISHED;
+  // otherwise the normal PUSH_PERIOD_MS cadence from when it started.
+  if (pushCatchUp ? (now - tPush >= PUSH_CATCHUP_GAP_MS) : (now - tPush >= PUSH_PERIOD_MS)) {
     tPush = now;
     netSlotUsed = true;
     bool acked = syncEngine.pushOnce();
+    pushCatchUp = acked && syncEngine.backlogPending();
+    if (pushCatchUp) tPush = millis();
     // Mark firmware healthy after the device has proven it can reach the server.
     if (acked && !healthySignalled) {
       ota.confirmHealthyBoot();

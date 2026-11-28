@@ -37,6 +37,7 @@
 #include "credential_display.h"
 #include "store.h"
 #include "wifi_provision.h"
+#include "eth_link.h"
 #include "queue.h"
 #include "totalizer.h"
 
@@ -83,6 +84,13 @@ private:
       Serial.printf("server_url: %s\n", st_->serverUrl().c_str());
       Serial.printf("api_key   : %s\n", apiKeyDisplay_().c_str());
       Serial.printf("wifi_ssid : %s\n", st_->wifiSsid().c_str());
+      {   // 1.6.1: wired uplink (eth_link.h)
+        String eth = !EthLink::started() ? String("off")
+                   : EthLink::up()       ? "up " + EthLink::ipString()
+                   : EthLink::linkUp()   ? String("link up, no DHCP address yet")
+                                         : String("no cable/link");
+        Serial.printf("ethernet  : %s\n", eth.c_str());
+      }
       Serial.printf("calib     : v%u  K=%.4f  density=%.3f  Tref=%.1f\n",
                     st_->cfgVer(), st_->kFactor(), st_->density(), st_->tRef());
       // Balaji V1 freeze remediation (Product Readiness Review P1-1):

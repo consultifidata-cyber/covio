@@ -44,7 +44,7 @@
 // FW_VERSION is a property of the SOURCE TREE, not of a product: both
 // products are cut from the same commit at the same version. What separates
 // them for OTA purposes is DEVICE_MODEL below.
-#define FW_VERSION            "1.6.0"
+#define FW_VERSION            "1.6.1"
 
 // ---- OTA hardware identity (hw_compat) --------------------------------------
 // ota.h passes DEVICE_MODEL as the manifest's `hw_compat` field and REFUSES
@@ -171,6 +171,29 @@
 #define BOARD_MODE            BOARD_RELAY1CH
 #endif
 
+// ---- Wired Ethernet uplink (1.6.1) -- see eth_link.h ------------------------
+// On by default on the 8DI-8DO board (it carries a W5500); impossible on the
+// Relay-1CH board, which has no Ethernet chip. Override with -DETH_ENABLE=0.
+#ifndef ETH_ENABLE
+#if BOARD_MODE == BOARD_8DI8DO
+#define ETH_ENABLE            1
+#else
+#define ETH_ENABLE            0
+#endif
+#endif
+#if ETH_ENABLE && BOARD_MODE != BOARD_8DI8DO
+#error "ETH_ENABLE needs BOARD_MODE=BOARD_8DI8DO (the only board with a W5500)."
+#endif
+#define ETH_PIN_SCLK          15          // Waveshare wiki: ETH_SCLK
+#define ETH_PIN_MOSI          13          // ETH_MOSI
+#define ETH_PIN_MISO          14          // ETH_MISO
+#define ETH_PIN_CS            16          // ETH_CS
+#define ETH_PIN_INT           12          // ETH_INT
+#define ETH_PIN_RST           39          // ETH_RST
+#define ETH_SPI_HOST          SPI2_HOST
+#define ETH_SPI_CLOCK_MHZ     20          // W5500 is rated to 80 MHz; 20 is conservative for board traces
+#define ETH_ROUTE_PRIO        150         // > Wi-Fi STA (100): wire wins whenever it has an IP
+
 // ---- Hardware pins ------------------------------------------------------------
 #if BOARD_MODE == BOARD_RELAY1CH
 // Waveshare ESP32-S3-Relay-1CH (the deployed production plant unit).
@@ -274,6 +297,13 @@
 // ---- Timing (all milliseconds) ----------------------------------------------
 #define TELEMETRY_PERIOD_MS   1000UL      // build one record this often
 #define PUSH_PERIOD_MS        5000UL      // attempt a queue flush this often
+// 1.6.1 catch-up: after an acked push that was a FULL batch (more rows are
+// waiting), the next push is due PUSH_CATCHUP_GAP_MS after this one ENDED
+// instead of PUSH_PERIOD_MS after it started. Measured from the end so the
+// loop always gets free iterations for the config/OTA/station polls between
+// pushes (they share the one-HTTPS-per-iteration slot). Was capped at
+// 50 rows / 5 s = 10 rows/s, i.e. ~25 h to drain a 2-week offline backlog.
+#define PUSH_CATCHUP_GAP_MS   250UL
 #define CONFIG_POLL_MS        60000UL     // re-fetch K-factor/config this often
 #define OTA_POLL_MS           300000UL    // check for new firmware this often (5 min)
 #define WIFI_RETRY_MS         10000UL     // base backoff for reconnect
