@@ -37,6 +37,7 @@
 #include "credential_display.h"
 #include "store.h"
 #include "wifi_provision.h"
+#include "eth_link.h"
 #include "queue.h"
 #include "totalizer.h"
 
@@ -48,6 +49,14 @@ public:
   void begin(Store* st, EventQueue* q = nullptr, Totalizer* tot = nullptr) {
     st_ = st; q_ = q; tot_ = tot;
   }
+
+#if STATION_ENABLE
+  // An optional handler for commands this class does not know (the Machine
+  // Station's `station ...`). Compiled into STATION_ENABLE builds only, so
+  // every other image stays byte-for-byte what it was.
+  typedef bool (*ExtraCommand)(const String& line);
+  void setExtraCommand(ExtraCommand fn) { extra_ = fn; }
+#endif
 
   void service() {
     while (Serial.available()) {
@@ -64,6 +73,7 @@ private:
     line.trim();
     if (line == "help") {
       Serial.println("cmds: show | set url <u> | set key <k> | set wifi <ssid> <pass> | reboot | factory | provision | reset_ack | recover_queue");
+      Serial.println("eth : set eth <ip> <mask> <gateway> <dns1> [dns2] | set eth dhcp   (reboot to apply)");
 #if MIKI_WIRE_PROFILE
       Serial.println("miki: set maxhz <0..2000> (pulse plausibility ceiling, 0=off) | "
                      "set suspects <0|60..604800> (longest plausible idle, seconds, 0=off)");
@@ -75,6 +85,16 @@ private:
       Serial.printf("server_url: %s\n", st_->serverUrl().c_str());
       Serial.printf("api_key   : %s\n", apiKeyDisplay_().c_str());
       Serial.printf("wifi_ssid : %s\n", st_->wifiSsid().c_str());
+      {   // 1.6.1: wired uplink (eth_link.h)
+        String eth = !EthLink::started() ? String("off")
+                   : EthLink::up()       ? "up " + EthLink::ipString()
+                   : EthLink::linkUp()   ? String("link up, no DHCP address yet")
+                                         : String("no cable/link");
+        String cfg = st_->ethStatic();
+        Serial.printf("ethernet  : %s  [config: %s]\n", eth.c_str(),
+                      cfg.length() ? ("static " + cfg).c_str() : "dhcp");
+        Serial.printf("route     : %s\n", EthLink::routeInfo().c_str());
+      }
       Serial.printf("calib     : v%u  K=%.4f  density=%.3f  Tref=%.1f\n",
                     st_->cfgVer(), st_->kFactor(), st_->density(), st_->tRef());
       // Balaji V1 freeze remediation (Product Readiness Review P1-1):
@@ -106,6 +126,22 @@ private:
         st_->setWifi(rest.substring(0, sp), rest.substring(sp + 1));
         Serial.println("[PROV] wifi saved. 'reboot' to apply.");
       } else Serial.println("[PROV] usage: set wifi <ssid> <pass>");
+    } else if (line.startsWith("set eth ")) {
+      // 1.6.2: wired Ethernet addressing. Validated before saving so a typo
+      // can never be stored; applied at the next boot.
+      String rest = line.substring(8); rest.trim();
+      if (rest == "dhcp") {
+        st_->setEthStatic("");
+        Serial.println("[PROV] ethernet = DHCP saved. 'reboot' to apply.");
+      } else {
+        EthLink::StaticCfg c;
+        if (EthLink::parseStatic(rest, c)) {
+          st_->setEthStatic(rest);
+          Serial.printf("[PROV] ethernet static saved: %s. 'reboot' to apply.\n", rest.c_str());
+        } else {
+          Serial.println("[PROV] usage: set eth <ip> <mask> <gateway> <dns1> [dns2]  |  set eth dhcp");
+        }
+      }
 #if MIKI_WIRE_PROFILE
     } else if (line.startsWith("set maxhz ")) {
       // Validated write (store.h refuses out-of-bounds). Applied live via
@@ -182,6 +218,10 @@ private:
       volatile uint32_t sink = 0;
       while (true) { sink++; }   // no feed, no yield-back to loop()
 #endif
+#if STATION_ENABLE
+    } else if (extra_ && extra_(line)) {
+      // handled by the station console
+#endif
     } else {
       Serial.println("[PROV] unknown. type: help");
     }
@@ -217,4 +257,7 @@ private:
   EventQueue* q_ = nullptr;
   Totalizer* tot_ = nullptr;
   String buf_;
+#if STATION_ENABLE
+  ExtraCommand extra_ = nullptr;
+#endif
 };

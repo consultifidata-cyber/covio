@@ -32,11 +32,19 @@
 #define MIKI_WIRE_PROFILE 0
 #endif
 
+// Machine Station (covio docs/specs/machine-station*.md; station_runtime.h).
+// OFF in every build unless an environment turns it on: only Miki Wire's does
+// (platformio.ini). With it off, not one line of station code is compiled and
+// the firmware is byte-for-byte the v1.4.0 behaviour.
+#ifndef STATION_ENABLE
+#define STATION_ENABLE 0
+#endif
+
 // ---- Firmware identity (bump on every release; OTA compares against this) ---
 // FW_VERSION is a property of the SOURCE TREE, not of a product: both
 // products are cut from the same commit at the same version. What separates
 // them for OTA purposes is DEVICE_MODEL below.
-#define FW_VERSION            "1.4.0"
+#define FW_VERSION            "1.6.3"
 
 // ---- OTA hardware identity (hw_compat) --------------------------------------
 // ota.h passes DEVICE_MODEL as the manifest's `hw_compat` field and REFUSES
@@ -163,6 +171,29 @@
 #define BOARD_MODE            BOARD_RELAY1CH
 #endif
 
+// ---- Wired Ethernet uplink (1.6.1) -- see eth_link.h ------------------------
+// On by default on the 8DI-8DO board (it carries a W5500); impossible on the
+// Relay-1CH board, which has no Ethernet chip. Override with -DETH_ENABLE=0.
+#ifndef ETH_ENABLE
+#if BOARD_MODE == BOARD_8DI8DO
+#define ETH_ENABLE            1
+#else
+#define ETH_ENABLE            0
+#endif
+#endif
+#if ETH_ENABLE && BOARD_MODE != BOARD_8DI8DO
+#error "ETH_ENABLE needs BOARD_MODE=BOARD_8DI8DO (the only board with a W5500)."
+#endif
+#define ETH_PIN_SCLK          15          // Waveshare wiki: ETH_SCLK
+#define ETH_PIN_MOSI          13          // ETH_MOSI
+#define ETH_PIN_MISO          14          // ETH_MISO
+#define ETH_PIN_CS            16          // ETH_CS
+#define ETH_PIN_INT           12          // ETH_INT
+#define ETH_PIN_RST           39          // ETH_RST
+#define ETH_SPI_HOST          SPI2_HOST
+#define ETH_SPI_CLOCK_MHZ     20          // W5500 is rated to 80 MHz; 20 is conservative for board traces
+#define ETH_ROUTE_PRIO        150         // > Wi-Fi STA (100): wire wins whenever it has an IP
+
 // ---- Hardware pins ------------------------------------------------------------
 #if BOARD_MODE == BOARD_RELAY1CH
 // Waveshare ESP32-S3-Relay-1CH (the deployed production plant unit).
@@ -199,6 +230,10 @@
 // pulse COUNTING: each physical pulse still yields exactly one rising edge.
 #define PIN_PULSE             4           // DI1 terminal (GPIO4) -> NPN flow pulses (onboard opto)
 #define PIN_CT_STATE          5           // DI2 terminal (GPIO5); active = LOW (opto inverts)
+// Machine Station card reader, 125 kHz Wiegand (wiegand.h). DI2 is also the CT
+// input, so a CT build cannot carry the reader (checked below).
+#define PIN_WIEGAND_D0        5           // DI2 terminal (GPIO5) <- reader GREEN (D0)
+#define PIN_WIEGAND_D1        6           // DI3 terminal (GPIO6) <- reader WHITE (D1)
 
 #else
 #error "Unknown BOARD_MODE -- valid values: BOARD_RELAY1CH (0, default), BOARD_8DI8DO (1)."
@@ -240,12 +275,35 @@
 #ifndef SENSOR_MODE
 #define SENSOR_MODE           SENSOR_MODE_NPN
 #endif
+
+// Machine Station's 125 kHz Wiegand reader (wiegand.h) on DI2/DI3. Station
+// environments turn it on (platformio.ini); it needs the 8DI-8DO's inputs, and
+// DI2 is the CT input, so a CT build cannot carry it.
+#ifndef STATION_READER_WIEGAND
+#define STATION_READER_WIEGAND 0
+#endif
+#if STATION_READER_WIEGAND && !STATION_ENABLE
+#error "STATION_READER_WIEGAND needs STATION_ENABLE=1."
+#endif
+#if STATION_READER_WIEGAND && BOARD_MODE != BOARD_8DI8DO
+#error "STATION_READER_WIEGAND needs BOARD_MODE=1 (8DI-8DO): the reader lands on DI2/DI3."
+#endif
+#if STATION_READER_WIEGAND && SENSOR_MODE == SENSOR_MODE_CT
+#error "STATION_READER_WIEGAND and SENSOR_MODE_CT both use DI2 (GPIO5)."
+#endif
 #define CT_PULSE_HZ           1           // synthesized pulses/sec while current present
 #define CT_DEBOUNCE_MS        100         // DI2 level debounce (on top of the board's own DI filtering)
 
 // ---- Timing (all milliseconds) ----------------------------------------------
 #define TELEMETRY_PERIOD_MS   1000UL      // build one record this often
 #define PUSH_PERIOD_MS        5000UL      // attempt a queue flush this often
+// 1.6.1 catch-up: after an acked push that was a FULL batch (more rows are
+// waiting), the next push is due PUSH_CATCHUP_GAP_MS after this one ENDED
+// instead of PUSH_PERIOD_MS after it started. Measured from the end so the
+// loop always gets free iterations for the config/OTA/station polls between
+// pushes (they share the one-HTTPS-per-iteration slot). Was capped at
+// 50 rows / 5 s = 10 rows/s, i.e. ~25 h to drain a 2-week offline backlog.
+#define PUSH_CATCHUP_GAP_MS   250UL
 #define CONFIG_POLL_MS        60000UL     // re-fetch K-factor/config this often
 #define OTA_POLL_MS           300000UL    // check for new firmware this often (5 min)
 #define WIFI_RETRY_MS         10000UL     // base backoff for reconnect

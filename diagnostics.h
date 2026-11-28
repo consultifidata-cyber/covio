@@ -81,6 +81,13 @@ public:
     s += (sync.online() ? "true" : "false");
     s += ",\"ssid\":\"" + st.wifiSsid() + "\"";
     s += ",\"rssi_dbm\":" + String((int)WiFi.RSSI()) + "}";
+    // 1.6.1: wired uplink state (eth_link.h). "wifi.connected" above keeps
+    // its old meaning-in-practice ("an uplink is up") for existing readers.
+    s += ",\"ethernet\":{\"enabled\":";
+    s += (EthLink::started() ? "true" : "false");
+    s += ",\"link\":";
+    s += (EthLink::linkUp() ? "true" : "false");
+    s += ",\"ip\":\"" + EthLink::ipString() + "\"}";
     s += ",\"server_url\":\"" + st.serverUrl() + "\"";
     s += ",\"api_key_status\":\"" + apiKeyStatus_(st) + "\"";
     s += ",\"sd_status\":\"";

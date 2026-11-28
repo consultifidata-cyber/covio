@@ -23,6 +23,7 @@
 // negotiates or inspects its own schema version at push time.
 // ============================================================================
 #pragma once
+#include "eth_link.h"   // 1.6.1: wired uplink counts as online
 #include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
@@ -31,6 +32,7 @@
 #include "queue.h"
 #include "telemetry.h"
 #include "certs.h"
+#include "relocate_url.h"   // D-315
 #include "timestamp_parse.h"   // overflow-safe int64 parsing (server_time_ms remediation)
 #include "ack_validation.h"    // Miki Wire hardening (F8): ack_seq bounding
 #include "checked_field_parse.h"   // overflow-safe uint32 parsing (ack_seq / K-factor version)
@@ -93,7 +95,13 @@ public:
     backoff_ += (esp_random() % 1000);                     // jitter
   }
 
-  bool online() { return WiFi.status() == WL_CONNECTED; }
+  // 1.6.1: online over EITHER uplink. The wired W5500 (eth_link.h) has the
+  // higher lwIP route priority, so when both are up traffic uses the cable.
+  bool online() { return WiFi.status() == WL_CONNECTED || EthLink::up(); }
+
+  // 1.6.1 catch-up: true when the last push was acked AND was a full batch,
+  // i.e. more queued rows are very likely waiting right now.
+  bool backlogPending() { return lastPushFull_; }
 
   // ---- DM-Phase 1 (local diagnostics, §13 A.3 /api/v1/status) ----
   // Getters only -- these retain values pushOnce()/pollConfig() already
@@ -111,6 +119,7 @@ public:
   // ---- Push queued records; prune on cumulative ack_seq ----
   // Returns true if at least one record was acked this call.
   bool pushOnce() {
+    lastPushFull_ = false;                // 1.6.1: set again only by a full, acked batch
     if (!online()) return false;
     // Miki Wire hardening (Phase-0 finding F7): exponential backoff after
     // failed pushes. Previously a dead/erroring server was retried every
@@ -177,6 +186,7 @@ public:
       return false;                       // bare 200 is not an ack (Invariant 6)
     }
     pushBackoffMs_ = 0;                   // F7: genuine ack -- reset backoff
+    lastPushFull_ = (n == PUSH_BATCH_MAX); // 1.6.1 catch-up signal
     // Miki Wire hardening (Phase-0 finding F8): never trust a server ack
     // beyond the highest seq this batch actually transmitted -- see
     // ack_validation.h for the full rationale. batch[] is FIFO by append
@@ -275,11 +285,56 @@ public:
         st_->setCfgVer((uint32_t)ver);
         Serial.printf("[SYNC] new calibration v%ld  K=%.4f\n", ver, k);
       }
+      // D-315 · the machine's counting rule. All three must be present and
+      // in range, or nothing changes; zeros switch back to edge counting.
+      long on = extractLong_(r, "count_on_ms");
+      long off = extractLong_(r, "count_off_ms");
+      long gap = extractLong_(r, "count_gap_ms");
+      if (on >= 0 && off >= 0 && gap >= 0 && on <= 5000 && off <= 5000 && gap <= 60000) {
+        CycleSettings want;
+        want.onStableMs = (uint16_t)on;
+        want.offStableMs = (uint16_t)off;
+        want.minGapMs = (uint16_t)gap;
+        CycleSettings have = st_->countSettings();
+        if (want.onStableMs != have.onStableMs || want.offStableMs != have.offStableMs ||
+            want.minGapMs != have.minGapMs) {
+          st_->setCountSettings(want);
+          Serial.printf("[SYNC] counting rule on=%ld off=%ld gap=%ld\n", on, off, gap);
+        }
+        if (countListener_) countListener_(want);
+      }
+      // D-315 · covio.in may name this board's new home. Only
+      // https://covio.in/fleet/<slug> is accepted (relocate_url.h); the next
+      // push goes there with the same key and the same queue.
+      String moveTo = extractStr_(r, "server_url");
+      if (moveTo.length() > 0 && moveTo != st_->serverUrl() &&
+          isAllowedRelocateUrl(moveTo.c_str())) {
+        st_->setServerUrl(moveTo);
+        Serial.printf("[SYNC] relocated to %s\n", moveTo.c_str());
+      }
     }
     http.end();
   }
 
+public:
+  typedef void (*CountListener)(const CycleSettings&);
+  void setCountListener(CountListener fn) { countListener_ = fn; }
+
 private:
+  CountListener countListener_ = nullptr;
+  // "key":"value" -> value, or "" (flat, trusted server contract).
+  static String extractStr_(const String& s, const char* key) {
+    String pat = "\"" + String(key) + "\"";
+    int i = s.indexOf(pat);
+    if (i < 0) return "";
+    i = s.indexOf(':', i);
+    if (i < 0) return "";
+    i = s.indexOf('"', i);
+    if (i < 0) return "";
+    int j = s.indexOf('"', i + 1);
+    if (j < 0) return "";
+    return s.substring(i + 1, j);
+  }
   // Minimal JSON scalar extractors. Good enough for the flat, trusted
   // server contract; not a general parser.
   //
@@ -367,6 +422,7 @@ private:
   bool     wifiAuthorityPaused_ = false;   // DM-Phase 2: see setWifiAuthorityPaused()
 
   // ---- DM-Phase 1 (local diagnostics) ----
+  bool     lastPushFull_ = false;     // 1.6.1 catch-up (see backlogPending())
   bool     haveSync_ = false;         // millis() 0 is a valid timestamp, so a
                                        // separate flag distinguishes "never
                                        // synced" from "synced at boot".

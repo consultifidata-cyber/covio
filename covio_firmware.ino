@@ -39,6 +39,12 @@
 #include "local_api.h"
 #include "wifi_provision.h"
 #include "sensor_stuck.h"  // Balaji V1 freeze remediation
+#if STATION_ENABLE
+#include "station_runtime.h"  // Machine Station -- STATION_ENABLE builds only
+#if STATION_READER_WIEGAND
+#include "wiegand.h"          // 125 kHz reader on DI2/DI3
+#endif
+#endif
 #if SENSOR_MODE == SENSOR_MODE_CT
 #include "sensor_ct.h"     // CT-clamp acquisition -- compiled ONLY into CT builds
 #endif
@@ -49,6 +55,36 @@
 
 Store         store;
 Totalizer     totalizer;
+
+// D-315 · the config poll delivers a counting rule; apply it live.
+static void applyCountingRule(const CycleSettings& s) { totalizer.applyCycleSettings(s); }
+// D-315 · {"mode":"cycles","raw_edges":N,"sampled_rises":N,"cycles":N,"too_soon":N,
+//          "on_ms":N,"off_ms":N,"gap_ms":N}, or {"mode":"edges"}.
+static String countingEnvelopeJson() {
+  if (!totalizer.cycleMode()) return String("{\"mode\":\"edges\"}");
+  CycleSettings s = store.countSettings();
+  String j = "{\"mode\":\"cycles\"";
+  j += ",\"raw_edges\":" + String((unsigned long long)totalizer.rawEdges());
+  j += ",\"sampled_rises\":" + String(totalizer.sampledRises());
+  j += ",\"cycles\":" + String(totalizer.cyclesCounted());
+  j += ",\"too_soon\":" + String(totalizer.cyclesTooSoon());
+  j += ",\"on_ms\":" + String(s.onStableMs);
+  j += ",\"off_ms\":" + String(s.offStableMs);
+  j += ",\"gap_ms\":" + String(s.minGapMs);
+  // D-320 · the exact rhythm: [index, ms on the sampler clock, ms HIGH, 1 counted / 0 refused],
+  // newest kEventLog every push, with the clock's value now so the server can place them.
+  CycleEvent ev[CycleCounter::kEventLog];
+  uint8_t n = totalizer.cycleEvents(ev);
+  j += ",\"now_ms\":" + String(Totalizer::samplerNowMs());
+  j += ",\"ev\":[";
+  for (uint8_t i = 0; i < n; i++) {
+    if (i) j += ",";
+    j += "[" + String(ev[i].index) + "," + String(ev[i].atMs) + "," + String(ev[i].highMs) + "," +
+         (ev[i].counted ? "1" : "0") + "]";
+  }
+  j += "]}";
+  return j;
+}
 EventQueue    eventQueue;
 Sync          syncEngine;
 Ota           ota;
@@ -58,6 +94,66 @@ WifiProvision wifiProvision;    // DM-Phase 2: SoftAP + captive-portal provision
 // Balaji V1 freeze remediation (Product Readiness Review P1-2): heuristic
 // sensor-stuck-at-zero detector, see sensor_stuck.h.
 SensorStuckDetector sensorStuck(SENSOR_STUCK_THRESHOLD_MS);
+#if STATION_ENABLE
+// Machine Station. The console reader "taps" cards from the serial console in
+// every build; with STATION_READER_WIEGAND the 125 kHz reader on DI2/DI3 sits
+// beside it (wiegand.h).
+station::ConsoleCardReader stationReader;
+#if STATION_READER_WIEGAND
+station::WiegandCardReader stationWiegand;
+station::WithConsole       stationCards(&stationWiegand, &stationReader);
+#endif
+station::StationRuntime   stationRuntime;
+static long stationWallNow() { return syncEngine.estimatedUnixNow(); }
+static bool stationTelemetryThisBoot = false;  // see the drain in loop()
+static String stationEnvelopeJson() { return stationRuntime.envelopeJson(); }
+static bool stationConsole(const String& line) {
+  if (line == "station") {
+    stationRuntime.printStatus(Serial);
+    return true;
+  }
+  if (line.startsWith("station tap ")) {
+    String uid = line.substring(12);
+    uid.trim();
+    Serial.println(stationReader.inject(uid.c_str()) ? "[STATION] tap queued"
+                                                     : "[STATION] not a card UID (8-16 hex)");
+    return true;
+  }
+  if (line == "station test") {
+    stationRuntime.requestSelfTest();
+    Serial.println("[STATION] self-test: green 1 s, amber 1 s, red 1 s, sounder 1 s -- watch each");
+    return true;
+  }
+#if STATION_READER_WIEGAND
+  if (line == "station wiegand") {
+    stationWiegand.printStats(Serial);
+    return true;
+  }
+  if (line == "station wiegand raw") {
+    stationWiegand.printRaw(Serial);
+    return true;
+  }
+#endif
+  if (line == "station pulses") {
+    // The counter's lifetime total, for the bench: count N pulses, read the
+    // difference.
+    Serial.printf("station pulses: total=%llu\n", (unsigned long long)totalizer.total());
+    return true;
+  }
+#if STATION_READER_WIEGAND
+  if (line == "station help") {
+    Serial.println("station | station tap <uid> | station test | station wiegand [raw]");
+    return true;
+  }
+#else
+  if (line == "station help") {
+    Serial.println("station | station tap <uid> | station test");
+    return true;
+  }
+#endif
+  return false;
+}
+#endif
 #if MIKI_WIRE_PROFILE
 // Miki Wire hardening (F5/F6): both constructed inert (0 = disabled) and
 // armed from validated NVS tunables in setup() -- INSUFFICIENT VERIFIED
@@ -74,6 +170,7 @@ SensorCt sensorCt(CT_PULSE_HZ, CT_DEBOUNCE_MS);
 
 uint32_t seq = 0;              // GLOBALLY monotonic telemetry sequence
 uint32_t tTelemetry = 0, tPush = 0, tConfig = 0, tOta = 0;
+bool pushCatchUp = false;   // 1.6.1: backlog drain mode (see PUSH_CATCHUP_GAP_MS)
 bool     healthySignalled = false;
 bool     crashStreakCleared = false;   // Balaji V1 freeze remediation
 
@@ -97,6 +194,12 @@ void covioBackgroundService() {
 }
 
 void setup() {
+#if STATION_ENABLE
+  // Before anything that can block or crash: the output expander survives a
+  // CPU reset, so whatever it drove before the reset is switched off first
+  // (station_io.h, Pca9554Outputs::earlyOff).
+  station::Pca9554Outputs::earlyOff();
+#endif
   Serial.begin(115200);
   delay(300);
   Serial.println("\n=== Covio Oil Flow Meter " FW_VERSION " ===");
@@ -223,6 +326,9 @@ void setup() {
 
   // 3) recover totalizer + queue state from SD
   totalizer.begin(store.bootId());
+  // D-315 · the counting rule last delivered for this machine (NVS); the
+  // config poll may change it at any time without a reboot.
+  totalizer.applyCycleSettings(store.countSettings());
   // ADR-003 (Phase 2): totalizer.begin() has already recovered the queue
   // write-offset checkpoint (q_segment/q_offset) by this point, so passing
   // &totalizer here is safe -- EventQueue::begin() reads it immediately
@@ -237,12 +343,29 @@ void setup() {
   // regression the ack floor prevents the "every new row filtered as
   // already-acked" transmission deadlock. See ack_validation.h.
   seq = resumeSeqFloor(totalizer.lastSeq(), eventQueue.ackedSeq());
+#if STATION_ENABLE
+  // After the queue and seq are recovered: the station's events become rows
+  // with the next seq. Outputs start OFF (station_io.h).
+  Telemetry::stationEnvelope() = stationEnvelopeJson;
+  provision.setExtraCommand(stationConsole);
+#if STATION_READER_WIEGAND
+  stationWiegand.begin(PIN_WIEGAND_D0, PIN_WIEGAND_D1);
+  stationRuntime.begin(stationWallNow, &stationCards);
+#else
+  stationRuntime.begin(stationWallNow, &stationReader);
+#endif
+#endif
 
   // 4) network + OTA trial-state check
   ota.begin(&store);
   ota.noteBoot();                     // "am I a freshly-OTA'd image on trial?"
   syncEngine.begin(&store, &eventQueue);
+  syncEngine.setCountListener(applyCountingRule);
+  Telemetry::countingEnvelope() = countingEnvelopeJson;
   syncEngine.wifiConnect();
+  // 1.6.1: bring up the W5500 wired uplink (8DI-8DO only; no-op elsewhere).
+  // After wifiConnect() so arduino-esp32 has created the default event loop.
+  EthLink::begin(store.ethStatic());   // 1.6.2: "" = DHCP
 
   // DM-Phase 2: bounded boot-time wait for the station connection just
   // kicked off above to resolve, before deciding between normal operation
@@ -255,14 +378,14 @@ void setup() {
   // connect failure.
   bool forceAp = WifiProvision::consumeReprovisionRequest();
   uint32_t staWaitStart = millis();
-  while (!forceAp && WiFi.status() != WL_CONNECTED &&
+  while (!forceAp && WiFi.status() != WL_CONNECTED && !EthLink::up() &&
          millis() - staWaitStart < AP_FALLBACK_TIMEOUT_MS) {
     provision.service();
     syncEngine.wifiService();
     delay(50);
   }
 
-  if (!forceAp && WiFi.status() == WL_CONNECTED) {
+  if (!forceAp && (WiFi.status() == WL_CONNECTED || EthLink::up())) {
     // DM-Phase 1: local diagnostics API. Bound after wifiConnect() so the
     // getters it reads (queue backlog, ota state, etc.) are all already wired;
     // its own mDNS start is deferred internally until the STA connection is
@@ -332,13 +455,19 @@ void loop() {
 #endif
   provision.service();                // serial console (help/show/set/...)
   syncEngine.wifiService();                 // keep WiFi up (non-blocking, backoff); no-op while AP authority is paused
+  EthLink::service();                       // 1.6.3: keep route + DNS on the wire while it has an address
 
   // DM-Phase 2: while provisioning mode is active, localApi has never been
   // begin()'d in this boot path (see setup() above) -- service only the
   // provisioning path and skip everything below that assumes normal
   // operation is running.
   if (wifiProvision.active()) {
-    if (wifiProvision.service()) {
+    bool uplinkBack = wifiProvision.service();
+    if (!uplinkBack && EthLink::up()) {    // 1.6.1: cable plugged in while in AP mode
+      wifiProvision.stopForWiredUplink();
+      uplinkBack = true;
+    }
+    if (uplinkBack) {
       // Station WiFi just confirmed while AP mode was active -- hand WiFi
       // authority back to Sync and start normal-operation local diagnostics.
       syncEngine.setWifiAuthorityPaused(false);
@@ -414,7 +543,38 @@ void loop() {
     // via isStuck()/msSinceLastChange() -- this is the ONLY call site that
     // mutates sensorStuck's state.
     sensorStuck.update(total, now);
+#if STATION_ENABLE
+    stationTelemetryThisBoot = true;
+    stationRuntime.setTotal(total);
+    stationRuntime.setInputSuspect((row.quality & (QUALITY_SUSPECT_RATE | QUALITY_SENSOR_SUSPECT)) != 0);
+    stationRuntime.setBacklog(eventQueue.pendingCount());
+#endif
   }
+#if STATION_ENABLE
+  // The station's events, in the order they happened, each with the next seq:
+  // the loop is still the only writer of the durable queue and of seq.
+  //
+  // Not before this boot's first telemetry row. A power cut between a row's
+  // write and its checkpoint leaves that row on flash with its seq not yet
+  // checkpointed, so the FIRST row after boot reuses the seq and the server
+  // keeps the earlier row and drops this one (resolveRecords: seq <= ack).
+  // That first row must be telemetry, whose total the next row repeats, and
+  // never a station event, which nothing would repeat.
+  if (stationTelemetryThisBoot) stationRuntime.drainInto([&](const station::StationPayload& p, uint32_t ts) {
+    seq++;
+    QRow srow = Telemetry::buildStation(store, p, seq, ts);
+    uint32_t failedBefore = eventQueue.failedWriteCount();
+    eventQueue.append(srow);
+    bool stored = eventQueue.failedWriteCount() == failedBefore;
+    // A row the flash refused gives its seq back: the server walks seqs
+    // without gaps and stops at a hole (resolveRecords), so a burned seq would
+    // freeze the ack for every row behind it, measurements included.
+    if (!stored) seq--;
+    totalizer.service(seq);
+    return stored;
+  });
+  stationRuntime.failsafe();
+#endif
 
   // Balaji V1 freeze remediation (Product Readiness Review P1-1): a run
   // that survives HEALTHY_UPTIME_CLEARS_CRASH_STREAK_MS (config.h) is
@@ -437,10 +597,15 @@ void loop() {
   bool netSlotUsed = false;
 
   // ---- flush queue to the configured endpoint ----
-  if (now - tPush >= PUSH_PERIOD_MS) {
+  // 1.6.1 catch-up: while full batches keep being acked (backlog waiting),
+  // the next push is due PUSH_CATCHUP_GAP_MS after this one FINISHED;
+  // otherwise the normal PUSH_PERIOD_MS cadence from when it started.
+  if (pushCatchUp ? (now - tPush >= PUSH_CATCHUP_GAP_MS) : (now - tPush >= PUSH_PERIOD_MS)) {
     tPush = now;
     netSlotUsed = true;
     bool acked = syncEngine.pushOnce();
+    pushCatchUp = acked && syncEngine.backlogPending();
+    if (pushCatchUp) tPush = millis();
     // Mark firmware healthy after the device has proven it can reach the server.
     if (acked && !healthySignalled) {
       ota.confirmHealthyBoot();
@@ -460,6 +625,10 @@ void loop() {
   }
 
   // ---- check for firmware updates ----
+#if STATION_ENABLE
+  if (!netSlotUsed && syncEngine.online())
+    netSlotUsed = stationRuntime.pollConfig(store.serverUrl(), store.apiKey(), PATH_CONFIG);
+#endif
   if (!netSlotUsed && now - tOta >= OTA_POLL_MS) {
     tOta = now;
     ota.poll(syncEngine.online(), syncEngine);    // DM-Phase 2: WiFi-authority consolidation -- may download + reboot into new image.

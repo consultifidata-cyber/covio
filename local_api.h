@@ -81,7 +81,7 @@ public:
     uint32_t now = millis();
     if (now - lastSampleMs_ >= 1000) {
       lastSampleMs_ = now;
-      if (!mdnsStarted_ && WiFi.status() == WL_CONNECTED) startMdns_();
+      if (!mdnsStarted_ && (WiFi.status() == WL_CONNECTED || EthLink::up())) startMdns_();  // 1.6.1: wired too
       sampleRssi_();
       samplePulseFreq_();
     }

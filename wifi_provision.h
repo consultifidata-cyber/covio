@@ -95,6 +95,15 @@ public:
 
   bool active() { return active_; }
 
+  // 1.6.1: the wired uplink came up while the SoftAP portal was running --
+  // leave provisioning so the device resumes normal operation over the cable
+  // (Sync keeps retrying the saved Wi-Fi in the background).
+  void stopForWiredUplink() {
+    if (!active_) return;
+    stop_();
+    Serial.println("[PROV-AP] wired Ethernet uplink up -- AP stopped");
+  }
+
   // Call once per loop() while active(). Returns true exactly once, the
   // moment station WiFi becomes confirmed while AP mode was active --
   // covio_firmware.ino uses this to hand WiFi authority back to Sync and
