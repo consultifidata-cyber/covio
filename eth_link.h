@@ -59,6 +59,10 @@ inline bool parseStatic(const String& text, StaticCfg& c) {
 #include "esp_netif.h"
 #include "esp_event.h"
 #include "esp_mac.h"
+#include "esp_netif_net_stack.h"   // esp_netif_get_netif_impl()
+#include "lwip/netif.h"
+#include "lwip/dns.h"
+#include "lwip/tcpip.h"
 
 extern bool tcpipInit();   // arduino-esp32 WiFiGeneric.cpp: esp_netif_init + default event loop, once
 
@@ -71,6 +75,33 @@ namespace detail {
   inline bool& started()         { static bool v = false; return v; }
   inline esp_netif_t*& netif()   { static esp_netif_t* v = nullptr; return v; }
   inline StaticCfg& cfg()        { static StaticCfg v; return v; }
+  // 1.6.3: DNS servers that belong to the wired port (static config, or
+  // whatever its DHCP lease handed out), re-imposed while the wire is up.
+  inline volatile uint32_t* wiredDns() { static volatile uint32_t v[2] = {0, 0}; return v; }
+  inline volatile bool& routeFixed() { static volatile bool v = false; return v; }
+  inline volatile bool& dnsFixed()   { static volatile bool v = false; return v; }
+
+  // Runs INSIDE the lwIP tcpip thread (via tcpip_callback), the only safe
+  // place to touch netif_default / the DNS table. ESP-IDF 4.4 has no
+  // esp_netif_set_default_netif(), and route_prio alone proved unreliable on
+  // the plant test (2026-11-28: wire up + internet OK, yet every push failed
+  // once the hotspot went away).
+  inline void enforceInTcpip(void*) {
+    esp_netif_t* en = netif();
+    if (!en) return;
+    struct netif* n = (struct netif*)esp_netif_get_netif_impl(en);
+    if (n && netif_default != n) { netif_set_default(n); routeFixed() = true; }
+    for (int i = 0; i < 2; i++) {
+      uint32_t want = wiredDns()[i];
+      if (!want) continue;
+      const ip_addr_t* cur = dns_getserver(i);
+      if (!cur || ip_2_ip4(cur)->addr != want) {
+        ip_addr_t a; IP_ADDR4(&a, want & 0xff, (want >> 8) & 0xff, (want >> 16) & 0xff, (want >> 24) & 0xff);
+        dns_setserver(i, &a);
+        dnsFixed() = true;
+      }
+    }
+  }
 
   inline esp_ip4_addr_t ip4(const IPAddress& a) { esp_ip4_addr_t r; r.addr = (uint32_t)a; return r; }
 
@@ -123,6 +154,11 @@ namespace detail {
       ip() = e->ip_info.ip.addr;
       gotIp() = true;
       Serial.printf("[ETH] got IP " IPSTR "\n", IP2STR(&e->ip_info.ip));
+      if (!cfg().valid && netif()) {        // DHCP: remember the lease's DNS for the wire
+        esp_netif_dns_info_t d;
+        if (esp_netif_get_dns_info(netif(), ESP_NETIF_DNS_MAIN, &d) == ESP_OK)   wiredDns()[0] = d.ip.u_addr.ip4.addr;
+        if (esp_netif_get_dns_info(netif(), ESP_NETIF_DNS_BACKUP, &d) == ESP_OK) wiredDns()[1] = d.ip.u_addr.ip4.addr;
+      }
     } else if (id == IP_EVENT_STA_GOT_IP) {
       applyDns();                         // Wi-Fi DHCP just replaced the DNS list
     } else if (id == IP_EVENT_ETH_LOST_IP) {
@@ -138,6 +174,32 @@ namespace detail {
 
 // True when the cable has link AND DHCP gave an address -- i.e. usable uplink.
 inline bool up() { return detail::linkUp() && detail::gotIp(); }
+
+// 1.6.3: call every loop. While the wire has an address, keep lwIP's default
+// route on it and its DNS servers in the global table (Wi-Fi DHCP otherwise
+// overwrites both). Rate-limited to once a second.
+inline void service() {
+  static uint32_t last = 0;
+  if (!detail::started() || millis() - last < 1000) return;
+  last = millis();
+  if (detail::cfg().valid) {
+    detail::wiredDns()[0] = (uint32_t)detail::cfg().dns1;
+    detail::wiredDns()[1] = (uint32_t)detail::cfg().dns2;
+  }
+  if (up()) tcpip_callback(&detail::enforceInTcpip, nullptr);
+  if (detail::routeFixed()) { detail::routeFixed() = false; Serial.println("[ETH] default route -> ethernet"); }
+  if (detail::dnsFixed())   { detail::dnsFixed() = false;   Serial.println("[ETH] DNS -> ethernet servers"); }
+}
+
+// For `show`: which interface lwIP currently routes through, and DNS #0.
+inline String routeInfo() {
+  struct netif* d = netif_default;
+  String s = d ? String(d->name[0]) + String(d->name[1]) + String(d->num) : String("none");
+  if (detail::netif() && d == (struct netif*)esp_netif_get_netif_impl(detail::netif())) s += "(ethernet)";
+  const ip_addr_t* dns = dns_getserver(0);
+  s += "  dns=" + (dns ? String(ipaddr_ntoa(dns)) : String("none"));
+  return s;
+}
 inline bool started() { return detail::started(); }
 inline bool linkUp() { return detail::linkUp(); }
 inline String ipString() {
@@ -241,6 +303,8 @@ inline bool begin(const String& staticText = String("")) {
 #else   // !ETH_ENABLE -- Wi-Fi-only boards: everything compiles away.
 namespace EthLink {
 inline bool begin(const String& = String("")) { return false; }
+inline void service() {}
+inline String routeInfo() { return String("wifi"); }
 inline bool up() { return false; }
 inline bool started() { return false; }
 inline bool linkUp() { return false; }

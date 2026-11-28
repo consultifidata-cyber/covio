@@ -93,6 +93,7 @@ private:
         String cfg = st_->ethStatic();
         Serial.printf("ethernet  : %s  [config: %s]\n", eth.c_str(),
                       cfg.length() ? ("static " + cfg).c_str() : "dhcp");
+        Serial.printf("route     : %s\n", EthLink::routeInfo().c_str());
       }
       Serial.printf("calib     : v%u  K=%.4f  density=%.3f  Tref=%.1f\n",
                     st_->cfgVer(), st_->kFactor(), st_->density(), st_->tRef());

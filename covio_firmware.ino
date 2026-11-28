@@ -455,6 +455,7 @@ void loop() {
 #endif
   provision.service();                // serial console (help/show/set/...)
   syncEngine.wifiService();                 // keep WiFi up (non-blocking, backoff); no-op while AP authority is paused
+  EthLink::service();                       // 1.6.3: keep route + DNS on the wire while it has an address
 
   // DM-Phase 2: while provisioning mode is active, localApi has never been
   // begin()'d in this boot path (see setup() above) -- service only the
