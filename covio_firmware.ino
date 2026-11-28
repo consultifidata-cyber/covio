@@ -365,7 +365,7 @@ void setup() {
   syncEngine.wifiConnect();
   // 1.6.1: bring up the W5500 wired uplink (8DI-8DO only; no-op elsewhere).
   // After wifiConnect() so arduino-esp32 has created the default event loop.
-  EthLink::begin();
+  EthLink::begin(store.ethStatic());   // 1.6.2: "" = DHCP
 
   // DM-Phase 2: bounded boot-time wait for the station connection just
   // kicked off above to resolve, before deciding between normal operation

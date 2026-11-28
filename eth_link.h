@@ -22,6 +22,34 @@
 #pragma once
 
 #include "config.h"
+#include <Arduino.h>
+#include <IPAddress.h>
+
+namespace EthLink {
+// 1.6.2: optional static IPv4 for the wired port (NVS "eth_static", console
+// `set eth <ip> <mask> <gateway> <dns1> [dns2]`). Some plant LANs only let a
+// whitelisted fixed address out to the internet.
+struct StaticCfg { IPAddress ip, mask, gw, dns1, dns2; bool valid = false; };
+inline bool parseStatic(const String& text, StaticCfg& c) {
+  c = StaticCfg();
+  String parts[5]; int n = 0; String t = text; t.trim();
+  while (t.length() && n < 6) {
+    int sp = t.indexOf(' ');
+    String tok = sp < 0 ? t : t.substring(0, sp);
+    t = sp < 0 ? String("") : t.substring(sp + 1); t.trim();
+    if (!tok.length()) continue;
+    if (n == 5) return false;               // too many fields
+    parts[n++] = tok;
+  }
+  if (n < 4) return false;
+  if (!c.ip.fromString(parts[0]) || !c.mask.fromString(parts[1]) ||
+      !c.gw.fromString(parts[2]) || !c.dns1.fromString(parts[3])) return false;
+  if (n == 5 && !c.dns2.fromString(parts[4])) return false;
+  if ((uint32_t)c.ip == 0 || (uint32_t)c.mask == 0) return false;
+  c.valid = true;
+  return true;
+}
+}  // namespace EthLink
 
 #if ETH_ENABLE
 #include <Arduino.h>
@@ -42,12 +70,45 @@ namespace detail {
   inline volatile uint32_t& ip() { static volatile uint32_t v = 0; return v; }
   inline bool& started()         { static bool v = false; return v; }
   inline esp_netif_t*& netif()   { static esp_netif_t* v = nullptr; return v; }
+  inline StaticCfg& cfg()        { static StaticCfg v; return v; }
+
+  inline esp_ip4_addr_t ip4(const IPAddress& a) { esp_ip4_addr_t r; r.addr = (uint32_t)a; return r; }
+
+  // lwIP keeps ONE global DNS server list; any interface's DHCP (e.g. the
+  // phone hotspot on Wi-Fi) overwrites it. Re-assert the wired DNS so name
+  // lookups keep working over the cable after the hotspot goes away.
+  inline void applyDns() {
+    if (!cfg().valid || !netif()) return;
+    esp_netif_dns_info_t d = {};
+    d.ip.type = ESP_IPADDR_TYPE_V4;
+    d.ip.u_addr.ip4 = ip4(cfg().dns1);
+    esp_netif_set_dns_info(netif(), ESP_NETIF_DNS_MAIN, &d);
+    if ((uint32_t)cfg().dns2) {
+      d.ip.u_addr.ip4 = ip4(cfg().dns2);
+      esp_netif_set_dns_info(netif(), ESP_NETIF_DNS_BACKUP, &d);
+    }
+  }
+  inline void applyStatic() {
+    if (!cfg().valid || !netif()) return;
+    esp_netif_dhcpc_stop(netif());        // ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED is fine
+    esp_netif_ip_info_t info = {};
+    info.ip = ip4(cfg().ip); info.netmask = ip4(cfg().mask); info.gw = ip4(cfg().gw);
+    esp_netif_set_ip_info(netif(), &info);
+    applyDns();
+  }
 
   inline void onEthEvent(void*, esp_event_base_t, int32_t id, void*) {
     switch (id) {
       case ETHERNET_EVENT_CONNECTED:
         linkUp() = true;
         Serial.println("[ETH] link up");
+        if (cfg().valid) {                  // static: no DHCP event will come
+          applyStatic();
+          ip() = (uint32_t)cfg().ip;
+          gotIp() = true;
+          Serial.printf("[ETH] static IP %s gw %s dns %s\n", cfg().ip.toString().c_str(),
+                        cfg().gw.toString().c_str(), cfg().dns1.toString().c_str());
+        }
         break;
       case ETHERNET_EVENT_DISCONNECTED:
         linkUp() = false; gotIp() = false; ip() = 0;
@@ -62,6 +123,8 @@ namespace detail {
       ip() = e->ip_info.ip.addr;
       gotIp() = true;
       Serial.printf("[ETH] got IP " IPSTR "\n", IP2STR(&e->ip_info.ip));
+    } else if (id == IP_EVENT_STA_GOT_IP) {
+      applyDns();                         // Wi-Fi DHCP just replaced the DNS list
     } else if (id == IP_EVENT_ETH_LOST_IP) {
       gotIp() = false; ip() = 0;
       Serial.println("[ETH] lost IP");
@@ -88,8 +151,14 @@ inline String ipString() {
 
 // Call once from setup(), AFTER Wi-Fi has been started (WiFi.mode/begin), so
 // arduino-esp32 owns creation of the default event loop as it expects.
-inline bool begin() {
+inline bool begin(const String& staticText = String("")) {
   if (detail::started()) return true;
+  if (staticText.length()) {
+    if (parseStatic(staticText, detail::cfg()))
+      Serial.printf("[ETH] static config: %s\n", staticText.c_str());
+    else
+      Serial.printf("[ETH] bad static config '%s' -- using DHCP\n", staticText.c_str());
+  }
   if (!tcpipInit()) return detail::fail("tcpipInit", ESP_FAIL);
 
   esp_err_t err = gpio_install_isr_service(0);
@@ -154,6 +223,10 @@ inline bool begin() {
   esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &detail::onEthEvent, nullptr);
   esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &detail::onIpEvent, nullptr);
   esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_LOST_IP, &detail::onIpEvent, nullptr);
+  if (detail::cfg().valid) {
+    esp_netif_dhcpc_stop(detail::netif());
+    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &detail::onIpEvent, nullptr);
+  }
 
   err = esp_eth_start(eth);
   if (err != ESP_OK) return detail::fail("eth_start", err);
@@ -166,9 +239,8 @@ inline bool begin() {
 }  // namespace EthLink
 
 #else   // !ETH_ENABLE -- Wi-Fi-only boards: everything compiles away.
-#include <Arduino.h>
 namespace EthLink {
-inline bool begin() { return false; }
+inline bool begin(const String& = String("")) { return false; }
 inline bool up() { return false; }
 inline bool started() { return false; }
 inline bool linkUp() { return false; }

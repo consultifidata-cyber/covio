@@ -64,6 +64,7 @@
 #define NVS_KEY_CNT_ON          "cnt_on"
 #define NVS_KEY_CNT_OFF         "cnt_off"
 #define NVS_KEY_CNT_GAP         "cnt_gap"
+#define NVS_KEY_ETH_STATIC      "eth_static"   // 1.6.2: "ip mask gw dns1 [dns2]" or empty = DHCP
 
 // ---- "covio_sec" namespace (NVS_NS_SECURITY): survives factoryReset() ------
 #define NVS_KEY_SEC_VER         "sec_ver"
@@ -99,6 +100,7 @@ static_assert(NVS_KEY_FITS(NVS_KEY_MW_SUSPECT_S),   "NVS key too long");
 static_assert(NVS_KEY_FITS(NVS_KEY_CNT_ON),         "NVS key too long");
 static_assert(NVS_KEY_FITS(NVS_KEY_CNT_OFF),        "NVS key too long");
 static_assert(NVS_KEY_FITS(NVS_KEY_CNT_GAP),        "NVS key too long");
+static_assert(NVS_KEY_FITS(NVS_KEY_ETH_STATIC),     "NVS key too long");
 static_assert(NVS_KEY_FITS(NVS_KEY_SEC_VER),        "NVS key too long");
 static_assert(NVS_KEY_FITS(NVS_KEY_LAST_OK_VER),    "NVS key too long");
 static_assert(NVS_KEY_FITS(NVS_KEY_LAST_OK_SECVER), "NVS key too long");

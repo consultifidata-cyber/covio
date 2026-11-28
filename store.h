@@ -89,6 +89,10 @@ public:
     p_.putString(NVS_KEY_WIFI_SSID, s); p_.putString(NVS_KEY_WIFI_PASS, pw);
   }
 
+  // ---- 1.6.2: wired Ethernet static IPv4 ("ip mask gw dns1 [dns2]"; "" = DHCP) ----
+  String ethStatic()                      { return p_.getString(NVS_KEY_ETH_STATIC, ""); }
+  void   setEthStatic(const String& v)    { p_.putString(NVS_KEY_ETH_STATIC, v); }
+
   // ---- calibration config version (K-factor itself is NOT stored here;
   //      it lives server-side. We only cache the version + values we were told
   //      so telemetry can stamp which calibration was in effect.) ----
